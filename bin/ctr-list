@@ -18,7 +18,7 @@ fi
 # shellcheck source=bin/ctr-common.sh
 . "$(dirname "$0")/ctr-common.sh"
 
-echo "== host: ${CTR_HOST_ID:-$(hostname)}  gpu: ${CTR_GPU_AVAILABLE}${CTR_GPU_INFO:+ ($CTR_GPU_INFO)} =="
+echo "== host: ${CTR_HOST_ID:-$(hostname)}  gpu: ${CTR_GPU_AVAILABLE}${CTR_GPU_INFO:+ ($CTR_GPU_INFO)}  docker in containers: $([ -n "${CTR_PODMAN_SOCKET:-}" ] && [ "${CTR_HOST_PODMAN:-yes}" != no ] && echo yes || echo no) =="
 if [ -r "$CONF_DIR/auto-update.env" ]; then
   # shellcheck disable=SC1091
   au=$(. "$CONF_DIR/auto-update.env"; printf '%s (%s) every %s' "$CTR_AUTO_URL" "${CTR_AUTO_BRANCH:-main}" "${CTR_AUTO_INTERVAL:-15min}")

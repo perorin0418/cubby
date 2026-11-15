@@ -110,6 +110,22 @@ else
   [ "$sid" = 0 ] && ok "4c sudo works without a password (sudo id -u -> 0)" || ng "4c sudo: '$sid'"
 fi
 
+# T. 開発ツール（イメージに入れたもの）が動く
+missing=$(cssh 'for c in go java node npm python3 pip3 jq yq kubectl helm aws docker; do command -v $c >/dev/null 2>&1 || printf "%s " $c; done; node -e "process.exit(0)" 2>/dev/null || printf "node(run) "; java -version >/dev/null 2>&1 || printf "java(run) "' 2>/dev/null | tr -d '\r')
+[ -z "$missing" ] && ok "T1 dev tools are available (go java node npm python3 pip3 jq yq kubectl helm aws docker)" \
+                   || ng "T1 missing tools: $missing"
+
+# D. コンテナ内から別のコンテナを起動できる（ホストの Podman の API ソケット）
+hsock=$(remote 'sed -n "s/^CTR_PODMAN_SOCKET=//p" "${XDG_CONFIG_HOME:-$HOME/.config}/cubby/detected.env" 2>/dev/null' | tr -d "\r'")
+if [ -z "$hsock" ]; then
+  sk "D1 no podman API socket on $REMOTE (containers cannot start other containers)"
+else
+  # 兄弟のコンテナで作業ディレクトリを同じパスでマウントし、書いたものが見えるか（イメージはホストにあるものを使う）
+  out=$(cssh "cd '$WORK' && echo from-sibling-test > d1.txt && docker run --rm -v '$WORK:$WORK' localhost/ctr-dev:latest cat '$WORK/d1.txt'; rm -f '$WORK/d1.txt'" 2>&1 | tr -d '\r' | tail -n 1)
+  [ "$out" = from-sibling-test ] && ok "D1 docker run inside the container starts a sibling container (work dir shared at the same path)" \
+                                 || ng "D1 docker run inside the container: $out"
+fi
+
 # 5. 作業ディレクトリ: 空で始まり、ホストと同じパスで見え、書いたものがホストから見える
 if [ "$(cssh "ls -A '$WORK' | wc -l" 2>/dev/null | tr -d ' \r')" = 0 ] \
    && cssh "echo hi > '$WORK/ctr-smoke-file'" >/dev/null 2>&1 \

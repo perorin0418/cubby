@@ -96,11 +96,19 @@ fi
 #                    ホスト名を設定でき、sshd :22 がホストの sshd と衝突しないようにする。
 # 追加マウント（~/.config/cubby/mounts）。ホストにないパスは警告して飛ばす。
 mount_sig=$(ctr_mount_sig)
+# ホストの Podman の API ソケット（setup-host.sh が detected.env に記録）。あればコンテナの
+# /var/run/docker.sock にマウントし、コンテナ内の docker CLI から別のコンテナを起動できるようにする
+# （起動したコンテナはホスト上の兄弟になる）。CTR_HOST_PODMAN=no で無効。
+docker=no
+if [ "${CTR_HOST_PODMAN:-yes}" != no ] && [ -n "${CTR_PODMAN_SOCKET:-}" ] && [ -S "$CTR_PODMAN_SOCKET" ]; then
+  docker=yes
+fi
 if ! podman container exists "$name" </dev/null 9>&-; then
-  log "creating container $name (gpu: $gpu)"
+  log "creating container $name (gpu: $gpu, docker: $docker)"
   set --
   # shellcheck disable=SC2086
   [ "$gpu" = yes ] && set -- $GPU_ARGS
+  [ "$docker" = no ] || set -- "$@" -v "$CTR_PODMAN_SOCKET:/var/run/docker.sock"
   while IFS= read -r spec; do
     [ -n "$spec" ] || continue
     set -- "$@" -v "$spec"
@@ -113,7 +121,7 @@ EOF
   # ホームはコンテナごとのボリュームで、ホストのホームと同じパスにマウントする。
   podman run -d --name "$name" --hostname "$name" \
     --label ctr.managed=true --label ctr.name="$name" --label ctr.gpu="$gpu" \
-    --label ctr.mounts="$mount_sig" \
+    --label ctr.mounts="$mount_sig" --label ctr.docker="$docker" \
     --uts=private --network=private \
     --userns=keep-id --user root --passwd=false \
     -e CTR_USER="$(id -un)" -e CTR_UID="$(id -u)" -e CTR_GID="$(id -g)" -e CTR_HOME="$HOME" \
@@ -135,6 +143,9 @@ else
   fi
   if ctr_image_outdated "$name" 9>&-; then
     log "the image was rebuilt since $name was created; run 'ctr-recreate $name' on the host to use it"
+  fi
+  if [ "$docker" = yes ] && [ "$(podman container inspect -f '{{index .Config.Labels "ctr.docker"}}' "$name" </dev/null 2>/dev/null 9>&-)" != yes ]; then
+    log "$name was created without the host podman socket; run 'ctr-recreate $name' on the host to use docker inside it"
   fi
   if [ "$(podman container inspect -f '{{.State.Running}}' "$name" </dev/null 9>&-)" != true ]; then
     log "starting container $name"

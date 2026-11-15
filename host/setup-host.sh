@@ -328,10 +328,28 @@ if [ "$gpu_mode" != off ]; then
     log "no usable GPU on this host (gpu-* connections are disabled)"
   fi
 fi
+# コンテナ内から別のコンテナを起動するための、ホストの Podman の API ソケット（Docker 互換）。
+# ctr-connect がこれをコンテナの /var/run/docker.sock にマウントし、コンテナ内の docker CLI が使う。
+# systemd のユーザーセッションがあれば podman.socket を有効にする（使われたときだけ podman が起動する）。
+psock=
+if [ "${CTR_HOST_PODMAN:-yes}" != no ]; then
+  if command -v systemctl >/dev/null 2>&1 && user_systemctl show-environment >/dev/null 2>&1; then
+    user_systemctl enable --now podman.socket >/dev/null 2>&1 \
+      || warn "could not enable podman.socket (systemctl --user enable --now podman.socket)"
+  fi
+  rt=${XDG_RUNTIME_DIR:-/run/user/$(id -u)}
+  if [ -S "$rt/podman/podman.sock" ]; then
+    psock="$rt/podman/podman.sock"
+    log "host podman API socket: $psock (containers can start other containers with docker)"
+  else
+    warn "no podman API socket at $rt/podman/podman.sock; containers cannot start other containers (without systemd: run 'podman system service --time=0 &' on the host)"
+  fi
+fi
 {
   echo "# written by setup-host.sh (cubby). Do not edit; override in config.env instead."
   echo "CTR_GPU_AVAILABLE=$gpu_avail"
   echo "CTR_GPU_INFO='$(printf '%s' "$gpu_info" | tr -d "'")'"
+  echo "CTR_PODMAN_SOCKET='$psock'"
 } > "$CONF_DIR/detected.env"
 
 # マウントの設定が変わったのに作り直していないコンテナを知らせる

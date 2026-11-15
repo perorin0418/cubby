@@ -60,7 +60,7 @@ bin/ctr-common.sh       ホスト側のスクリプトが共有する部分（�
 host/bootstrap-root.sh  root が要るホストの準備（cubby add-host が必要なときだけ sudo で実行する）
 host/setup-host.sh      ホストの準備（cubby add-host が自動で実行する）
 host/preflight.sh       ホストの事前確認（変更しない）
-image/                  コンテナイメージ（sshd, nc, git, curl, tini, sudo。利用者のユーザーは含めない）
+image/                  コンテナイメージ（sshd・sudo・開発ツール・docker CLI など。利用者のユーザーは含めない）
 image/ctr-entrypoint.sh 起動時にホストのユーザーをコンテナの /etc/passwd に登録し、sudo を許可する
 config.env.example      ホスト側の設定の見本
 tests/smoke.sh          CLI で確かめられる受け入れテスト（手元から実行）
@@ -161,6 +161,43 @@ cubby はリポジトリを管理しません。各コンテナには空の作�
 - コンテナを作り直しても（`ctr-recreate`、`podman rm`）、作業ディレクトリとホームは残ります。
 - **GitHub などの認証はコンテナ内で用意してください**。ホーム（ボリューム）に置いたものはコンテナを作り直しても残るので、一度設定すればそのコンテナでは使い続けられます（例: コンテナ内で `gh auth login`（gh は別途インストール）、デプロイキーや個人用の鍵を `~/.ssh` に置く、`git config --global user.name/user.email`）。
 - 手元の ssh-agent はコンテナに転送しません（Desktop がエージェント転送を使うかは未確認のため）。
+
+## コンテナで使える開発ツール
+
+各コンテナには、次のものが入っています（イメージをビルドした時点の版。amd64・arm64 に対応）。
+
+| 種類 | ツール | 入れ方・版 |
+|---|---|---|
+| Go | `go`・`gofmt` | go.dev の公式バイナリ（最新の安定版）。`go install` したものは `~/go/bin` |
+| Java | `java`・`javac` ほか（`JAVA_HOME=/opt/java`） | Eclipse Temurin 21（LTS） |
+| Node.js | `node`・`npm`・`npx` | nodejs.org の公式バイナリ（最新の LTS） |
+| Python | `python3`・`pip3`・`venv` | Debian 12 の Python 3.11。パッケージは `python3 -m venv` の中で入れる（Debian はシステムへの `pip install` を止めている） |
+| JSON / YAML | `jq`・`yq` | jq は Debian、yq は mikefarah/yq の公式バイナリ |
+| Kubernetes | `kubectl`・`helm` | 公式バイナリ（最新） |
+| AWS | `aws` | AWS CLI v2 |
+| コンテナ | `docker`・`docker compose`・`docker buildx` | Docker の公式リポジトリの CLI（デーモンは入れない。「コンテナの中から別のコンテナを起動する」を参照） |
+| その他 | `git`・`curl`・`sudo`・`unzip`・`xz`・`less`・`ps` など | Debian |
+
+- 版を新しくしたいときは、`cubby update <id> --rebuild` でイメージを作り直し、コンテナを `ctr-recreate` で作り直します。
+- ほかに必要なものは `image/Dockerfile` に追記して push します（「コンテナイメージのカスタマイズ」を参照）。そのコンテナだけで使うなら `sudo apt-get install ...` でも入れられます（作り直すと消えます）。
+- イメージは約 2.4 GB で、ホストでの初回のビルドには数分かかります。
+
+## コンテナの中から別のコンテナを起動する
+
+コンテナ内で `docker` コマンドが使えます。ホストの Podman（ログインユーザーの rootless Podman）の API ソケットが、各コンテナの `/var/run/docker.sock` にマウントされています。
+
+```sh
+docker run --rm docker.io/library/alpine echo hello
+docker build -t myapp . && docker run --rm myapp
+docker compose up -d
+```
+
+- 起動したコンテナは、**ホスト上の兄弟のコンテナ**になります（入れ子ではありません）。イメージのキャッシュはホストと共有し、cubby のコンテナを作り直しても消えません。不要になったら `docker rm` / `docker compose down` で消してください（`ctr-remove` は消しません）。
+- 作業ディレクトリはホストと同じパスなので、`docker run -v "$PWD:/src" ...` のようなマウントはそのまま使えます。**ホーム（`~`）の下のファイルは、作業ディレクトリと `--mount` のもの以外はホストにないので、マウントしても空に見えます**。
+- 起動したコンテナのポートに `localhost` でつなぎたいときは、`--network container:$(hostname)` を付けて、cubby のコンテナと同じネットワークで動かします（例 `docker run -d --network container:$(hostname) postgres` → `localhost:5432`）。
+- `docker build`・`docker compose build` は、Podman が実装している従来のビルド（`DOCKER_BUILDKIT=0`）を使うよう設定しています。
+- ホストで `podman.socket`（systemd のユーザーサービス）を `add-host` / `update` が有効にします。systemd のないホストでは使えません（ホストで `podman system service --time=0 &` を動かしておけば使えます）。使えるかどうかは `ctr-list` の `docker in containers:` に出ます。
+- コンテナの中から、そのホストのログインユーザーの全コンテナ（ほかの cubby のコンテナも）を操作できます。不要なホストでは `config.env` に `CTR_HOST_PODMAN=no` と書き、`ctr-recreate` で作り直すと無効になります。
 
 ## コンテナ内の sudo
 
@@ -399,6 +436,7 @@ sh tests/smoke.sh <id> [--cleanup]
 | `CTR_IMAGE` | `localhost/ctr-dev:latest` | コンテナイメージ |
 | `CTR_GPU_ARGS` | `--device nvidia.com/gpu=all` | `gpu-` のコンテナに付ける podman の引数（例 AMD は `--device /dev/kfd --device /dev/dri --group-add keep-groups`） |
 | `CTR_SUDO` | `yes` | `no` にするとコンテナ内の sudo を許可しない |
+| `CTR_HOST_PODMAN` | `yes` | `no` にするとホストの Podman の API ソケットをコンテナに渡さない（コンテナ内の docker が使えなくなる） |
 | `CTR_MOUNTS_FILE` | `~/.config/cubby/mounts` | 追加マウントの設定ファイル |
 | `CTR_HOSTKEYS` | `~/.config/cubby/hostkeys` | コンテナ用のホスト鍵の置き場 |
 | `CTR_AUTHKEYS` | `~/.config/cubby/authorized_keys` | コンテナに登録する公開鍵の置き場（ファイル名はユーザー名） |
@@ -410,7 +448,7 @@ sh tests/smoke.sh <id> [--cleanup]
 | ファイル | 内容 |
 |---|---|
 | `~/.config/cubby/mounts` | 追加マウントの一覧（`--mount` / `--unmount` で編集。直接編集してもよい） |
-| `~/.config/cubby/detected.env` | `add-host` が自動で書く検出結果（GPU が使えるか）。編集しない |
+| `~/.config/cubby/detected.env` | `add-host` が自動で書く検出結果（GPU が使えるか・Podman の API ソケットの場所）。編集しない |
 | `~/.local/share/cubby/` | cubby のスクリプトとイメージの定義（`add-host` / `update` の転送、または自動更新で置かれる）。`src/` は自動更新で取得したリポジトリ |
 | `~/.config/cubby/auto-update.env` | 自動更新の設定（取得元・ブランチ・間隔）。`add-host` が書く |
 | `~/.config/cubby/auto-update.state` | 自動更新で最後に反映したコミット・日時・結果 |
@@ -441,6 +479,8 @@ sh tests/smoke.sh <id> [--cleanup]
 | `auto-update: ... -> fetch-failed` / `clone-failed` | ホストからリポジトリに届くか（ネットワーク）。非公開リポジトリならデプロイキーが GitHub に登録されているか。ホストで `ctr-sync` を実行するとエラーが見える |
 | `auto-update: ... -> setup-failed` | 反映（イメージのビルドなど）に失敗した。ホストの `~/.local/state/cubby/sync.log`。次の間隔で再試行する |
 | push したのに反映されない | 間隔（既定 15 分）を待つか、ホストで `ctr-sync`。`ctr-list` の `auto-update:` の行のブランチが push したブランチか |
+| コンテナ内で `docker` が `Cannot connect to the Docker daemon` | `ctr-list` の `docker in containers:`。no ならホストの systemd のユーザーセッション（`systemctl --user status podman.socket`）。yes なのに使えないなら、そのコンテナが古い（`... created without the host podman socket` と出る）ので `ctr-recreate <名前>` |
+| `docker run -v ~/...` で中身が空 | ホームの下は作業ディレクトリと `--mount` のもの以外ホストにない。作業ディレクトリの中に置く |
 | `containers still using an older image` / `the image was rebuilt since ...` | イメージを作り直した後、古いイメージのままのコンテナがある。反映するならホストで `ctr-recreate <名前>` |
 | `mount settings changed since ...` | マウントの設定が変わった。反映するならホストで `ctr-recreate <名前>` |
 | `sudo: a password is required` | ホストの `config.env` が `CTR_SUDO=no` になっていないか。旧版のイメージで作ったコンテナなら `cubby update <id>` の後に `ctr-recreate <名前>` |
@@ -483,6 +523,8 @@ sh tests/smoke.sh <id> [--cleanup]
 | マウントは repo の `.git`・worktree・ホーム・鍵のみ | ホストごとの `~/.config/cubby/mounts` で任意のディレクトリを全コンテナにマウント。`cubby add-host --mount/--unmount`、反映は `ctr-recreate` | 利用者の要望 |
 | — | `~/.ssh/config` の書き換えを mkdir のロックで排他し、別のファイルに書いてから置き換える | 複数の `add-host` を同時に動かすと、互いのブロックを上書きしたり、書き換え中のファイルを ssh が読んで失敗したりしたため（検証で判明） |
 | コンテナ内に `dev` ユーザーを作り（UID/GID をホストに合わせてイメージをビルド）、`dev` でログイン | ユーザーは作らない。起動時にホストのログインユーザー（同じ名前・UID・GID・ホームのパス）をコンテナの `/etc/passwd` に登録し、その名前でログインする。イメージはホストに依存しない（版のラベルで古いイメージを自動で作り直す） | 権限の食い違いを避けるため（利用者の要望） |
+| 開発ツールなし（sshd・git・curl のみ） | Go・Java 21・Node.js LTS・Python・jq・yq・kubectl・helm・AWS CLI を入れる | 利用者の要望 |
+| コンテナからコンテナは起動できない | ホストの Podman の API ソケットを `/var/run/docker.sock` に渡し、docker CLI で兄弟のコンテナを起動できる（入れ子ではない） | 利用者の要望。入れ子より速く、イメージのキャッシュを共有でき、作業ディレクトリのパスが一致するため |
 | コンテナ内で sudo は使えない | ホストのユーザーにパスワードなしの sudo を許可（`CTR_SUDO=no` で無効） | 利用者の要望。コンテナ内の root はホストの root ではないため |
 | ホストの更新は手作業 | 各ホストが cubby のリポジトリを定期的に取得し、新しいコミットを自動で反映する（systemd のユーザータイマー・`ctr-sync`） | 利用者の要望（Dockerfile などの変更を自動で行き渡らせるため） |
 | イメージの作り直しは手作業（`docker build`） | `cubby update` が `image/` の中身のハッシュを比べ、変わっていれば自動で作り直す。古いイメージのコンテナを知らせる。登録後の更新は `add-host` ではなく `cubby update`（登録時の設定を記録して使う） | 利用者の要望 |
