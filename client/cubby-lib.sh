@@ -58,6 +58,38 @@ rssh() {
   fi
 }
 
+# パスワードを渡す SSH_ASKPASS 用の小さなプログラムを作り、そのパスを出す。
+# パスワードそのものはファイルに書かず、環境変数 CUBBY_ASKPASS_PW で渡す。
+# 使い終わったら呼び出し側で消す。
+make_askpass() {
+  d=$(mktemp -d)
+  chmod 700 "$d"
+  if [ "$CUBBY_OS" = windows ]; then
+    # Windows 標準の ssh.exe はスクリプトを直接実行できないので .cmd から PowerShell で出力する
+    # （cmd の echo では & や % などの記号を含むパスワードが壊れるため）
+    printf '@powershell.exe -NoProfile -NonInteractive -Command "[Console]::Out.Write($env:CUBBY_ASKPASS_PW)"\r\n' \
+      > "$d/askpass.cmd"
+    natpath "$d/askpass.cmd"
+  else
+    printf '#!/bin/sh\nprintf "%%s\\n" "$CUBBY_ASKPASS_PW"\n' > "$d/askpass"
+    chmod 700 "$d/askpass"
+    printf '%s\n' "$d/askpass"
+  fi
+}
+
+# パスワードを読む。端末なら表示せずに尋ね、端末でなければ標準入力から 1 行読む（自動化用）。
+read_secret() {
+  if [ -t 0 ]; then
+    printf '%s' "$1" >&2
+    stty -echo 2>/dev/null || true
+    IFS= read -r secret || secret=
+    stty echo 2>/dev/null || true
+    echo >&2
+  else
+    IFS= read -r secret || secret=
+  fi
+}
+
 # ~/.ssh/config の cubby の管理ブロックから、ホスト ID の SSH 名を読む
 #   # >>> cubby <id> ssh-host=<alias> >>>
 cubby_alias_of() {

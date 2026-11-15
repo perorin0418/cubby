@@ -24,6 +24,9 @@
 #   cubby remove-host [-y] <id>     手元の登録だけを消す（ホスト上のものは消さない）
 #
 # add-host がすること（ホスト側の事前準備は不要。`ssh <ホスト>` で入れて sudo が使えればよい）:
+#   0. ホストに鍵認証で入れなければ、ログインのパスワードを 1 回だけ尋ねて、手元の公開鍵を
+#      ホストの ~/.ssh/authorized_keys に追記する（sudo にも同じパスワードを試す）
+#      パスワードは端末なら表示せずに尋ね、端末でなければ標準入力から 1 行読む
 #   1. ~/.ssh/config の先頭に、このホスト用の管理ブロック（# >>> cubby <id> ... >>>）を書く
 #   2. host/bootstrap-root.sh で root が要る準備が残っているか調べ、残っていれば sudo で実行する
 #      （Podman などのパッケージ・subuid/subgid・linger・ディレクトリ。済んでいれば sudo は使わない。
@@ -99,6 +102,59 @@ find_pubkeys() {
     "$SSH_ADD_BIN" -L | tr -d '\r'; return
   fi
   die "no public key found; pass --key FILE"
+}
+
+# ホストに鍵認証で入れることを確かめる。入れなければ、ログインのパスワードを 1 回だけ尋ねて
+# 手元の公開鍵をホストの ~/.ssh/authorized_keys に追記する（ssh-copy-id と同じ。既存の行は消さない）。
+# 入力したパスワードは login_pw に残し、sudo で同じパスワードを試すのに使う。
+ensure_key_auth() {
+  a=$1
+  log "checking ssh $a ..."
+  if errs=$(rssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new "$a" true </dev/null 2>&1); then
+    return 0
+  fi
+  case "$errs" in
+    *'Permission denied'*) ;;
+    *) printf '%s\n' "$errs" >&2
+       die "cannot ssh to $a. Check the host name, network, and cloudflared login" ;;
+  esac
+  case "$errs" in
+    *password*|*keyboard-interactive*) ;;
+    *) printf '%s\n' "$errs" >&2
+       die "$a accepts only public keys and yours is not registered there; register it once by another means" ;;
+  esac
+
+  # 登録する公開鍵（ホストへのログインに使う鍵）。種類と本体だけを使う（コメントは付け直す）
+  if [ -n "$identity" ] && [ -r "$identity.pub" ]; then
+    hkeys=$(cat "$identity.pub")
+  else
+    hkeys=$(find_pubkeys "$key")
+  fi
+  hkeys=$(printf '%s\n' "$hkeys" | tr -d '\r' | awk '
+    ($1 ~ /^(ssh-|ecdsa-|sk-)/) && ($2 ~ /^[A-Za-z0-9+\/=]+$/) { print $1 " " $2 }')
+  [ -n "$hkeys" ] || die "no usable public key to register on $a"
+  qkeys=
+  for k in $(printf '%s\n' "$hkeys" | tr ' ' '|'); do qkeys="$qkeys '$(printf '%s' "$k" | tr '|' ' ')'"; done
+
+  log "key authentication to $a failed; registering your public key there (asks for the login password once)"
+  read_secret "password for ${user:-your user} on $a: "
+  login_pw=$secret; secret=
+  askpass=$(make_askpass)
+  # shellcheck disable=SC2016
+  remote_cmd='umask 077; mkdir -p ~/.ssh && touch ~/.ssh/authorized_keys && n=0 && for k in '"$qkeys"'; do grep -qF "$k" ~/.ssh/authorized_keys || { printf "%s cubby\n" "$k" >> ~/.ssh/authorized_keys; n=$((n+1)); }; done; echo "added $n key(s) to ~/.ssh/authorized_keys" >&2'
+  set +e
+  CUBBY_ASKPASS_PW=$login_pw SSH_ASKPASS=$askpass SSH_ASKPASS_REQUIRE=force DISPLAY=${DISPLAY:-cubby:0} \
+    MSYS2_ENV_CONV_EXCL='CUBBY_ASKPASS_PW;SSH_ASKPASS' \
+    rssh -o StrictHostKeyChecking=accept-new -o PreferredAuthentications=keyboard-interactive,password \
+         -o NumberOfPasswordPrompts=1 "$a" "$remote_cmd" </dev/null
+  rc=$?
+  set -e
+  rm -rf "$(dirname "$askpass")" 2>/dev/null || true
+  [ "$rc" = 0 ] || { login_pw=; die "could not log in to $a with the password"; }
+
+  rssh -o BatchMode=yes "$a" true </dev/null 2>/dev/null \
+    || die "registered the key on $a, but key authentication still fails (check permissions of ~ and ~/.ssh on the host, and that the key is in your ssh-agent)"
+  log "registered your public key on $a; key authentication works now"
 }
 
 cmd_add_host() {
@@ -179,10 +235,10 @@ cmd_add_host() {
     log "removed old $SSH_DIR/cubby/$id.conf"
   fi
 
-  # ホストに入れるか（Cloudflare Access の初回はブラウザでのログインを求められる）
-  log "checking ssh $alias_name ..."
-  rssh "$alias_name" true </dev/null \
-    || die "cannot ssh to $alias_name. Make sure 'ssh $alias_name' works (cloudflared login, host key, user key)"
+  # ホストに鍵で入れるようにする（Cloudflare Access の初回はブラウザでのログインを求められる）
+  # ホスト自体のホスト鍵は初回に自動で受け入れる（accept-new。変わっていたら止まる）
+  login_pw=
+  ensure_key_auth "$alias_name"
 
   # ホストに既に設定があれば、その値を既定にする（既存の側に従う）
   remote_conf=$(rssh "$alias_name" 'cat "${XDG_CONFIG_HOME:-$HOME/.config}/cubby/config.env" 2>/dev/null' </dev/null || true)
@@ -213,17 +269,23 @@ cmd_add_host() {
         rssh "$alias_name" "sudo -n sh .cache/cubby/bootstrap-root.sh $bargs" </dev/null \
           || die "root setup failed on $alias_name"
       else
-        # パスワードは手元で尋ね、SSH の標準入力経由で sudo -S に渡す（端末の割り当てに依存しない）
-        [ -t 0 ] || die "sudo on $alias_name needs a password; run cubby from a terminal, or ask an admin to run on the host: $manual"
-        printf 'sudo password for %s on %s: ' "${user:-your user}" "$alias_name" >&2
-        stty -echo 2>/dev/null || true
-        IFS= read -r pw || pw=
-        stty echo 2>/dev/null || true
-        echo >&2
-        printf '%s\n' "$pw" | rssh "$alias_name" "sudo -S -p '' sh .cache/cubby/bootstrap-root.sh $bargs" \
-          || { pw=; die "root setup failed on $alias_name (wrong password, or no sudo rights). An admin can run on the host: $manual"; }
-        pw=
+        # パスワードは手元で尋ね、SSH の標準入力経由で sudo -S に渡す（端末の割り当てに依存しない）。
+        # ログインのパスワードを入力済みなら、まずそれを試す（多くの場合 sudo と同じ）。
+        sudo_pw=
+        if [ -n "$login_pw" ] && printf '%s\n' "$login_pw" \
+             | rssh "$alias_name" "sudo -S -p '' true" >/dev/null 2>&1; then
+          sudo_pw=$login_pw
+        else
+          read_secret "sudo password for ${user:-your user} on $alias_name: "
+          sudo_pw=$secret; secret=
+          printf '%s\n' "$sudo_pw" | rssh "$alias_name" "sudo -S -p '' true" >/dev/null 2>&1 \
+            || { sudo_pw=; die "sudo failed on $alias_name (wrong password, or no sudo rights). An admin can run on the host: $manual"; }
+        fi
+        printf '%s\n' "$sudo_pw" | rssh "$alias_name" "sudo -S -p '' sh .cache/cubby/bootstrap-root.sh $bargs" \
+          || { sudo_pw=; die "root setup failed on $alias_name"; }
+        sudo_pw=
       fi
+      login_pw=
       ;;
     *)  die "host check failed on $alias_name" ;;
   esac

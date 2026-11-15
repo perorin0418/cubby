@@ -61,17 +61,21 @@ tests/smoke.sh          CLI で確かめられる受け入れテスト（手元�
 
 ## 必要なもの
 
-**リモートホスト（各台）**: Linux。`ssh <ホスト>` でログインでき、そのユーザーが sudo を使えること。**これ以外の準備は要りません**。足りないものは `cubby add-host` が入れます。
+**リモートホスト（各台）**: Linux。`ssh <ホスト>` でログインでき（**パスワード認証でもよい**）、そのユーザーが sudo を使えること。**これ以外の準備は要りません**。足りないものは `cubby add-host` が入れます。
 
 | 自動で用意するもの | 内容 |
 |---|---|
+| ホストへのログイン用の公開鍵 | 鍵認証で入れなければ、ログインのパスワードを 1 回だけ尋ねて手元の公開鍵をホストの `~/.ssh/authorized_keys` に追記する（`ssh-copy-id` と同じ。既存の行は消さない） |
 | パッケージ | podman, git, flock, ssh-keygen, tar, newuidmap/newgidmap ほか（apt / dnf / yum / zypper / pacman / apk に対応） |
 | rootless の設定 | `/etc/subuid`・`/etc/subgid` の範囲、newuidmap/newgidmap の権限、linger |
 | ディレクトリ | 元リポジトリ・worktree の置き場（なければログインユーザー所有で作る） |
 | 元リポジトリ | `--repo-url` を指定すると clone する（ssh の URL は手元の ssh-agent を転送して認証） |
 | cubby 本体 | 設定、コンテナ用のホスト鍵、公開鍵の登録、スクリプト、コンテナイメージ |
 
-root が要る作業は、残っているときだけ sudo で行います（2 回目以降は通常 sudo を使いません）。sudo にパスワードが要る場合は、手元の端末で尋ねます。既存のディレクトリの所有者や中身、既存の設定値は変えません。
+root が要る作業は、残っているときだけ sudo で行います（2 回目以降は通常 sudo を使いません）。sudo にパスワードが要る場合は、先に入力したログインのパスワードをまず試し、違えば手元の端末で尋ねます。
+
+Desktop は接続の途中でパスワードを入力できないため、日常の接続は鍵認証で行います。パスワードを使うのは `add-host` の初回だけです。パスワードは ssh に端末経由ではなく `SSH_ASKPASS`（一時的な小さなプログラム。終了時に消す）で渡すので、Windows・macOS・Linux のどれでも同じように動きます。端末がない場合（自動化）は、標準入力から 1 行読みます（例 `printf '%s
+' "$PW" | sh client/cubby add-host ...`）。ホストの sshd がパスワード認証を許可していない場合は、最初の鍵の登録だけ別の手段で行ってください（sshd の設定は変えません）。既存のディレクトリの所有者や中身、既存の設定値は変えません。
 
 **手元の PC（Claude Desktop を動かすマシン）**:
 
@@ -104,7 +108,7 @@ sh client/cubby add-host gpu1 \
 `add-host` は次をまとめて行います（何度実行しても同じ結果になります）。
 
 1. `~/.ssh/config` の先頭に、このホスト用の管理ブロック（`# >>> cubby gpu1 ... >>>` 〜 `# <<< cubby gpu1 <<<`）を書く。元のファイルは `config.cubby.bak` に保存します。`Include` は使わないので、`Include` を解釈しない SSH クライアントでも読めます
-2. `ssh gpu1` が通るか確かめる。Cloudflare Access の初回はブラウザでのログインを求められます
+2. `ssh gpu1` に鍵で入れるか確かめる。入れなければログインのパスワードを 1 回尋ねて公開鍵を登録する。Cloudflare Access の初回はブラウザでのログインを求められます。ホスト自体のホスト鍵は初回に自動で受け入れます（以後、変わっていれば止まります）
 3. root が要る準備が残っていれば sudo で行う（上の表）
 4. ホストにスクリプトを転送し、元リポジトリの clone、公開鍵の登録（既定は `~/.ssh/id_ed25519.pub` など。`--key` で指定可）、ホスト鍵の生成、イメージのビルド（初回は数分）、rootless コンテナの動作確認を行う
 5. コンテナのホスト鍵を `~/.ssh/known_hosts` に `cubby-gpu1` として登録する。ホストへの認証済みの SSH で受け取るので、初回接続時の確認は出ません
@@ -168,7 +172,10 @@ Desktop での確認（セッションがコンテナ内で動く・再起動後
 
 | 症状 | 確認すること |
 |---|---|
-| `cannot ssh to <host>` | `ssh <host>` が単体で通るか。cloudflared のログイン（ブラウザ）、ホストの鍵の登録 |
+| `cannot ssh to <host>` | `ssh <host>` が単体で通るか。ホスト名・ネットワーク、cloudflared のログイン（ブラウザ） |
+| `could not log in ... with the password` | ログインのパスワード。ホストの sshd がパスワード認証を許可しているか |
+| `key authentication still fails` | ホストの `~`・`~/.ssh` の権限（グループや他人が書けると sshd が鍵を無視する）。鍵にパスフレーズがあるなら ssh-agent に登録されているか |
+| `accepts only public keys` | ホストがパスワード認証を許可していない。最初の鍵の登録だけ別の手段で行う |
 | `ssh ctr-x.<id>` が `kex_exchange_identification` などで即切れる | `ssh <host> '.local/bin/ctr-connect ctr-x.<id> </dev/null \| head -c 8'` が `SSH-2.0-` を返すか。標準エラー出力の `ctr-connect:` のメッセージ |
 | `invalid name` / `host id mismatch` | 接続名が `ctr-<作業名>.<ホストID>` の形か。ホスト ID はホストの `~/.config/cubby/config.env` の `CTR_HOST_ID` |
 | `lock timeout` | 同名の ctr-connect が準備中のまま残っていないか（`$XDG_RUNTIME_DIR/cubby-locks`） |
@@ -200,5 +207,6 @@ Desktop での確認（セッションがコンテナ内で動く・再起動後
 | — | ロック中に起動するコマンドで fd 9 を閉じる | rootless Podman の conmon・fuse-overlayfs がロックの fd を受け継ぎ、ロックを持ち続けたため（検証で判明） |
 | — | linger を有効化する | rootless では、無効だとログアウト時にコンテナが止まるため |
 | ホストの事前準備（docker・git の導入、ディレクトリ作成）は手作業 | `cubby add-host` が必要なときだけ sudo で自動実行（`host/bootstrap-root.sh`） | 利用者の要望 |
+| ホストへのログインは鍵認証が前提 | パスワード認証のホストでも、`add-host` が初回に公開鍵を登録する | 利用者の要望 |
 | `docker run --init` | イメージに tini を入れて PID 1 にする | ホストの catatonit の有無に依存しないため |
 | 手元は macOS・Linux の OpenSSH 前提、`~/.ssh/config` に手で追記 | Windows・macOS・Linux に対応。`~/.ssh/config` の先頭に管理ブロックを書く（`Include` は使わない）。ProxyCommand は絶対パス。Windows は Windows 標準の OpenSSH を使う | 利用者の要望。GUI から起動した Desktop の PATH が最小限のため |
