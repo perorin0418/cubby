@@ -285,7 +285,7 @@ macOS・Linux・Git Bash は `sh client/cubby ...`、Windows の PowerShell は 
 | `--user USER` | 手元のユーザー名 | ホストのログインユーザー（`--hostname` と一緒に使う）。コンテナにも同じユーザーで入る |
 | `--port N` | 22 | ホストの SSH ポート（`--hostname` と一緒に使う） |
 | `--cloudflared` | なし | Cloudflare Tunnel 経由で接続する（`ProxyCommand cloudflared access ssh --hostname %h`。`--hostname` と一緒に使う） |
-| `--identity FILE` | ssh の既定 | ホストとコンテナへのログインに使う秘密鍵。公開鍵の登録には `FILE.pub` を使う |
+| `--identity FILE` | ssh の既定 | ホストとコンテナへのログインに使う秘密鍵。公開鍵の登録には `FILE.pub` を使う（`--key` を省略したらコンテナにもこれを登録する）。鍵の名前が `id_ed25519` などの既定と違うときに指定する。`~/.ssh/...`・`C:\Users\...` どちらの書き方でもよい |
 | `--ssh-host ALIAS` | `<id>` | ホストの SSH 名。`--hostname` を使わず、`~/.ssh/config` に自分で書いた既存の設定を使うときに指定する |
 | `--key FILE` | `~/.ssh/id_ed25519.pub` → `id_ecdsa.pub` → `id_rsa.pub` → ssh-agent の鍵 | コンテナ（とホスト）に登録する公開鍵 |
 | `--work-root PATH` | `~/cubby/work` | ホスト上の作業ディレクトリの置き場。各コンテナの作業ディレクトリは `<置き場>/<名前>`。初回のみ有効（既存の設定は変えない） |
@@ -370,6 +370,8 @@ sh tests/smoke.sh <id> [--cleanup]
 
 | 症状 | 確認すること |
 |---|---|
+| `no SSH key found` | 鍵の名前が既定（`id_ed25519` など）と違う。表示された候補を `--identity` で指定する。鍵がなければ `ssh-keygen -t ed25519` で作る |
+| `unknown option` | オプションの綴り（近い名前があれば `did you mean` で表示する） |
 | `cannot ssh to <host>` | `ssh <host>` が単体で通るか。ホスト名・ネットワーク、cloudflared のログイン（ブラウザ） |
 | `could not log in ... with the password` | ログインのパスワード。ホストの sshd がパスワード認証を許可しているか |
 | `key authentication still fails` | ホストの `~`・`~/.ssh` の権限（グループや他人が書けると sshd が鍵を無視する）。鍵にパスフレーズがあるなら ssh-agent に登録されているか |
