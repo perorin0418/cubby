@@ -1,0 +1,175 @@
+#!/bin/sh
+# host/bootstrap-root.sh --user USER --repo PATH --worktrees PATH [--check]
+#
+# rootless Podman で cubby を動かすための、root 権限が要る準備をする。
+# 通常は手元の `client/cubby add-host` から自動で呼ばれる。何度実行しても同じ結果になる。
+#
+#   --check  root 不要。準備が要るかだけを調べる（終了コード 0: 不要、10: 要る、1: 続行不可）
+#   （なし） root で実行する。足りないものだけを用意する:
+#     - パッケージ: podman, git, flock, ssh-keygen, tar, newuidmap/newgidmap など
+#     - /etc/subuid・/etc/subgid に USER の範囲（65536 個）
+#     - USER の linger（SSH が切れてもコンテナと Claude Code 本体を動かし続ける）
+#     - 元リポジトリ・worktree の置き場のディレクトリ（なければ USER 所有で作る）
+#
+# 既存のディレクトリの所有者や中身は変えない。
+set -eu
+
+user= repo= wt= check=0
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --user)      user=$2; shift 2 ;;
+    --repo)      repo=$2; shift 2 ;;
+    --worktrees) wt=$2; shift 2 ;;
+    --check)     check=1; shift ;;
+    *) echo "bootstrap: unknown option: $1" >&2; exit 1 ;;
+  esac
+done
+[ -n "$user" ] && [ -n "$repo" ] && [ -n "$wt" ] || {
+  echo "usage: $0 --user USER --repo PATH --worktrees PATH [--check]" >&2; exit 1; }
+
+log()  { printf 'bootstrap: %s\n' "$*" >&2; }
+die()  { printf 'bootstrap: ERROR: %s\n' "$*" >&2; exit 1; }
+
+[ "$user" != root ] || die "log in as a normal user, not root (containers run rootless as that user)"
+
+REQUIRED_CMDS="podman git flock ssh-keygen tar newuidmap newgidmap"
+
+missing_cmds() {
+  for c in $REQUIRED_CMDS; do command -v "$c" >/dev/null 2>&1 || printf '%s ' "$c"; done
+}
+has_subid() { grep -q "^$user:" "$1" 2>/dev/null; }
+# newuidmap/newgidmap が setuid か file capability を持っているか（ないと rootless で名前空間を作れない）
+uidmap_ok() {
+  for b in newuidmap newgidmap; do
+    p=$(command -v "$b" 2>/dev/null) || return 1
+    [ -u "$p" ] && continue
+    # getcap がなければ判断できないので、問題なしとみなす（推測で setuid を付けない）
+    command -v getcap >/dev/null 2>&1 || continue
+    getcap "$p" 2>/dev/null | grep -q 'cap_set[ug]id' && continue
+    return 1
+  done
+}
+linger_needed() {
+  command -v loginctl >/dev/null 2>&1 || return 1
+  [ -d /run/systemd/system ] || return 1
+  [ "$(loginctl show-user "$user" -p Linger --value 2>/dev/null)" != yes ]
+}
+# ディレクトリを USER が使える状態か: 0 使える / 1 作る必要がある / 2 既存だが使えない
+dir_state() {
+  if [ -e "$1" ]; then
+    if [ "$check" = 1 ]; then [ -w "$1" ] && return 0; return 2; fi
+    su_test=$(stat -c %U "$1")
+    [ "$su_test" = "$user" ] && return 0
+    # 所有者が違っても USER が書ければよい
+    if command -v runuser >/dev/null 2>&1; then
+      runuser -u "$user" -- test -w "$1" && return 0
+    else
+      su "$user" -s /bin/sh -c "test -w '$1'" && return 0
+    fi
+    return 2
+  fi
+  if [ "$check" = 1 ]; then
+    p=$(dirname "$1"); while [ ! -e "$p" ]; do p=$(dirname "$p"); done
+    [ -w "$p" ] && return 0
+  fi
+  return 1
+}
+
+# ---- 調べるだけ ----
+if [ "$check" = 1 ]; then
+  need=
+  m=$(missing_cmds); [ -z "$m" ] || need="$need packages($m)"
+  [ -n "$m" ] || uidmap_ok || need="$need uidmap-caps"
+  has_subid /etc/subuid || need="$need subuid"
+  has_subid /etc/subgid || need="$need subgid"
+  if linger_needed; then need="$need linger"; fi
+  for d in "$repo" "$wt"; do
+    set +e; dir_state "$d"; s=$?; set -e
+    case $s in
+      1) need="$need mkdir($d)" ;;
+      2) die "$d exists but is not writable by $user; fix its owner or choose another path" ;;
+    esac
+  done
+  if [ -n "$need" ]; then log "needs root for:$need"; exit 10; fi
+  exit 0
+fi
+
+# ---- root で準備する ----
+[ "$(id -u)" = 0 ] || die "run as root (sudo)"
+
+# パッケージ
+m=$(missing_cmds)
+if [ -n "$m" ]; then
+  log "installing packages (missing: $m)"
+  # shellcheck disable=SC1091
+  . /etc/os-release 2>/dev/null || true
+  if command -v apt-get >/dev/null 2>&1; then
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get update -q >&2
+    apt-get install -y -q podman uidmap slirp4netns fuse-overlayfs git openssh-client util-linux tar >&2
+  elif command -v dnf >/dev/null 2>&1; then
+    dnf install -y -q podman git-core util-linux openssh-clients tar shadow-utils >&2
+  elif command -v yum >/dev/null 2>&1; then
+    yum install -y -q podman git util-linux openssh-clients tar shadow-utils >&2
+  elif command -v zypper >/dev/null 2>&1; then
+    zypper -n -q install podman git-core util-linux openssh-clients tar shadow >&2
+  elif command -v pacman >/dev/null 2>&1; then
+    pacman -S --noconfirm --needed podman git util-linux openssh tar shadow >&2
+  elif command -v apk >/dev/null 2>&1; then
+    apk add -q podman git util-linux openssh-keygen tar shadow-uidmap fuse-overlayfs >&2
+  else
+    die "unknown package manager (${PRETTY_NAME:-unknown OS}); install: $m"
+  fi
+  m=$(missing_cmds)
+  [ -z "$m" ] || die "still missing after install: $m"
+fi
+
+# newuidmap/newgidmap の権限（パッケージ本来の状態に戻す。コンテナ内で入れたときなどに失われる）
+if ! uidmap_ok; then
+  if command -v rpm >/dev/null 2>&1; then
+    rpm --setcaps shadow-utils >&2 2>/dev/null || true
+  fi
+  if ! uidmap_ok; then
+    for b in newuidmap newgidmap; do chmod u+s "$(command -v "$b")"; done
+    log "set the setuid bit on newuidmap/newgidmap"
+  else
+    log "restored file capabilities of newuidmap/newgidmap"
+  fi
+fi
+
+# subuid / subgid（既存の範囲と重ならない場所に 65536 個）
+add_subid() {
+  f=$1
+  touch "$f"
+  has_subid "$f" && return 0
+  start=$(awk -F: 'BEGIN{m=100000} NF>=3 {e=$2+$3; if (e>m) m=e} END{print m}' "$f")
+  printf '%s:%s:65536\n' "$user" "$start" >> "$f"
+  log "added $user:$start:65536 to $f"
+  migrate=1
+}
+migrate=0
+add_subid /etc/subuid
+add_subid /etc/subgid
+if [ "$migrate" = 1 ]; then
+  # ユーザー側で podman system migrate を実行させる目印（setup-host.sh が見る）
+  home=$(getent passwd "$user" | cut -d: -f6)
+  install -d -o "$user" -m 700 "$home/.config" "$home/.config/cubby" 2>/dev/null || true
+  touch "$home/.config/cubby/.needs-migrate" && chown "$user" "$home/.config/cubby/.needs-migrate"
+fi
+
+# linger
+if linger_needed; then
+  loginctl enable-linger "$user"
+  log "enabled linger for $user"
+fi
+
+# ディレクトリ（なければ USER 所有で作る。既存のものは変えない）
+for d in "$repo" "$wt"; do
+  set +e; dir_state "$d"; s=$?; set -e
+  case $s in
+    1) install -d -o "$user" -m 755 "$d"; log "created $d (owner $user)" ;;
+    2) die "$d exists but is not writable by $user; fix its owner or choose another path" ;;
+  esac
+done
+
+log "root setup done"

@@ -84,7 +84,7 @@ if ! podman container exists "$name" </dev/null 9>&-; then
     --uts=private --network=private \
     --userns=keep-id --user root \
     --security-opt label=disable \
-    --init --restart unless-stopped \
+    --restart unless-stopped \
     -v "$name-home:/home/dev" \
     -v "$REPO/.git:$REPO/.git" \
     -v "$wt:$wt" \

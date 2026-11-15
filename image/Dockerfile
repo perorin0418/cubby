@@ -9,7 +9,7 @@ ARG DEV_GID=1000
 # ホスト鍵はイメージに含めない（ホストから読み取り専用でマウントする）。
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
-      openssh-server netcat-openbsd git ca-certificates curl bash \
+      openssh-server netcat-openbsd git ca-certificates curl bash tini \
  && rm -rf /var/lib/apt/lists/* \
  && rm -f /etc/ssh/ssh_host_* \
  && mkdir -p /run/sshd \
@@ -18,4 +18,7 @@ RUN apt-get update \
 
 COPY ctr-sshd.conf /etc/ssh/sshd_config.d/ctr.conf
 
+# tini を PID 1 にして、孤児になったプロセス（ゾンビ）を回収させる。
+# ホスト側の podman --init（catatonit）の有無に依存しないよう、イメージに含める。
+ENTRYPOINT ["/usr/bin/tini", "--"]
 CMD ["/usr/sbin/sshd", "-D", "-e"]

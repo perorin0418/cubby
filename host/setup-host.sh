@@ -1,16 +1,18 @@
 #!/bin/sh
-# host/setup-host.sh [--id ID] [--repo PATH] [--worktrees PATH] [--pubkeys FILE|-] [--rebuild]
+# host/setup-host.sh [--id ID] [--repo PATH] [--repo-url URL] [--worktrees PATH] [--pubkeys FILE|-] [--rebuild]
 #
 # リモートホストの準備。ログインユーザーで実行する（sudo 不要・rootless Podman）。
 # 通常は手元の `client/cubby add-host` から自動で呼ばれる。何度実行しても同じ結果になる。
+# root が要る準備（パッケージ・subuid・linger・ディレクトリ）は host/bootstrap-root.sh が先に済ませる。
 #
+#   元リポジトリ                         なければ --repo-url から clone する
 #   ~/.config/cubby/config.env          なければ作る（既存の値は変えない）
 #   ~/.config/cubby/hostkeys/           全コンテナ共通のホスト鍵。なければ作る（上書きしない）
 #   ~/.config/cubby/authorized_keys/dev 渡された公開鍵のうち未登録の行だけ追記する
 #   worktree の置き場                    なければ作る
 #   ~/.local/bin/ctr-*                  スクリプトを設置する
 #   イメージ                             なければビルドする（--rebuild で作り直す）
-#   linger                              有効でなければ有効化を試みる
+#   動作確認                             rootless でコンテナが起動できるか確かめる
 #
 # 最後に標準出力へ 1 行だけ「CUBBY_HOSTKEY <ホスト公開鍵>」を出す（手元が known_hosts に登録する）。
 # それ以外の出力はすべて標準エラー出力へ出す。
@@ -21,11 +23,12 @@ log()  { printf 'setup-host: %s\n' "$*" >&2; }
 warn() { printf 'setup-host: WARNING: %s\n' "$*" >&2; }
 die()  { printf 'setup-host: ERROR: %s\n' "$*" >&2; exit 1; }
 
-id_arg= repo_arg= wt_arg= pubkeys= rebuild=0
+id_arg= repo_arg= repo_url= wt_arg= pubkeys= rebuild=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --id)        id_arg=$2; shift 2 ;;
     --repo)      repo_arg=$2; shift 2 ;;
+    --repo-url)  repo_url=$2; shift 2 ;;
     --worktrees) wt_arg=$2; shift 2 ;;
     --pubkeys)   pubkeys=$2; shift 2 ;;
     --rebuild)   rebuild=1; shift ;;
@@ -63,8 +66,16 @@ keep CTR_HOST_ID "$id_arg" "${CTR_HOST_ID:-}"
 keep CTR_REPO "$repo_arg" "$REPO"
 keep CTR_WT_ROOT "$wt_arg" "$WT_ROOT"
 
-# 元リポジトリ
-[ -d "$REPO/.git" ] || die "$REPO/.git not found (clone the repository first, or pass --repo)"
+# 元リポジトリ（なければ clone する。ssh の URL は手元から転送された ssh-agent で認証する）
+if [ ! -d "$REPO/.git" ]; then
+  [ -n "$repo_url" ] || die "$REPO/.git not found; pass --repo-url to clone it, or --repo to use another path"
+  if [ -d "$REPO" ] && [ -n "$(ls -A "$REPO" 2>/dev/null)" ]; then
+    die "$REPO exists and is not empty, but is not a git repository"
+  fi
+  log "cloning $repo_url into $REPO"
+  GIT_SSH_COMMAND='ssh -o StrictHostKeyChecking=accept-new' \
+    git clone -q "$repo_url" "$REPO" </dev/null >&2 || die "git clone failed"
+fi
 [ -w "$REPO/.git" ] || die "$REPO/.git is not writable by $(id -un)"
 [ "$(stat -c %u "$REPO/.git")" = "$(id -u)" ] \
   || warn "$REPO/.git is not owned by $(id -un); the container user dev (uid $(id -u)) may fail to write"
@@ -125,6 +136,12 @@ log "installed ctr-connect ctr-list ctr-remove to $BIN_DIR"
 grep -q "^$(id -un):" /etc/subuid 2>/dev/null \
   || warn "no /etc/subuid entry for $(id -un); rootless containers with --userns=keep-id will fail"
 
+# bootstrap-root.sh が subuid/subgid を足したときは、podman に読み直させる
+if [ -e "$CONF_DIR/.needs-migrate" ]; then
+  podman system migrate >&2 && rm -f "$CONF_DIR/.needs-migrate"
+  log "ran podman system migrate"
+fi
+
 # イメージ（dev の UID/GID はログインユーザーと同じにする。--userns=keep-id で対応づけるため）
 if [ "$rebuild" = 1 ] || ! podman image exists "$IMAGE"; then
   log "building image $IMAGE (uid $(id -u), gid $(id -g)) ..."
@@ -133,17 +150,17 @@ if [ "$rebuild" = 1 ] || ! podman image exists "$IMAGE"; then
   log "built $IMAGE"
 fi
 
-# linger: 無効だと SSH が切れたときにユーザーのプロセス（コンテナと Claude Code 本体）が止まる。
-if command -v loginctl >/dev/null 2>&1; then
-  if [ "$(loginctl show-user "$(id -un)" -p Linger --value 2>/dev/null)" != yes ]; then
-    if loginctl enable-linger "$(id -un)" 2>/dev/null; then
-      log "enabled linger for $(id -un)"
-    else
-      warn "linger is off; ask an admin: sudo loginctl enable-linger $(id -un)"
-    fi
-  fi
-else
-  warn "loginctl not found; make sure user processes survive SSH logout"
+# rootless でコンテナが動くか（ctr-connect と同じ指定で）確かめる
+if ! out=$(podman run --rm --userns=keep-id --user root --security-opt label=disable \
+            --uts=private --network=private "$IMAGE" id -un dev 2>&1 </dev/null); then
+  printf '%s\n' "$out" >&2
+  die "cannot run a rootless container (check /etc/subuid, /etc/subgid, and user namespaces / AppArmor)"
+fi
+log "rootless container check passed"
+
+# linger（bootstrap-root.sh が有効化する。無効だと SSH が切れたときにコンテナが止まる）
+if command -v loginctl >/dev/null 2>&1 && [ -d /run/systemd/system ]    && [ "$(loginctl show-user "$(id -un)" -p Linger --value 2>/dev/null)" != yes ]; then
+  warn "linger is off for $(id -un); containers stop when the last SSH session ends"
 fi
 
 log "done (host id: ${CTR_HOST_ID:-unset})"
