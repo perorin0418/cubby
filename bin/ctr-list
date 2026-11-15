@@ -38,6 +38,15 @@ if [ -n "$outdated" ]; then
   echo "  containers created with older mount settings:$outdated"
   echo "  (apply with: ctr-recreate <name>)"
 fi
+oldimg=
+for c in $(podman ps -a --filter label=ctr.managed=true --format '{{.Names}}'); do
+  ctr_image_outdated "$c" && oldimg="$oldimg $c"
+done
+if [ -n "$oldimg" ]; then
+  echo
+  echo "== containers still using an older image:$oldimg"
+  echo "   (the image was rebuilt; apply with: ctr-recreate <name>)"
+fi
 echo
 echo "== work directories ($WORK_ROOT) =="
 found=0

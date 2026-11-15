@@ -68,3 +68,12 @@ ctr_container_sig() {
   case "$s" in ''|'<no value>') s=$(printf '' | cksum | cut -d' ' -f1) ;; esac
   printf '%s\n' "$s"
 }
+
+# コンテナが今のイメージ（作り直す前の古いイメージでないか）で作られているか。
+# 古ければ 0 を返す（ctr-recreate で作り直すと新しいイメージになる）。
+ctr_image_outdated() {
+  img=${CTR_IMAGE:-localhost/ctr-dev:latest}
+  cur=$(podman image inspect -f '{{.Id}}' "$img" </dev/null 2>/dev/null) || return 1
+  used=$(podman container inspect -f '{{.Image}}' "$1" </dev/null 2>/dev/null) || return 1
+  [ -n "$cur" ] && [ -n "$used" ] && [ "$cur" != "$used" ]
+}

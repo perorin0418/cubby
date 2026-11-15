@@ -177,14 +177,23 @@ if [ -e "$CONF_DIR/.needs-migrate" ]; then
 fi
 
 # イメージ。利用者のユーザーはイメージに含めない（起動時にホストのユーザーを登録する）ので、
-# ホストに依存しない。版（cubby.image-version）が期待と違う古いイメージは作り直す。
-want_ver=$(sed -n 's/^LABEL cubby.image-version="\(.*\)"/\1/p' "$here/image/Dockerfile")
-have_ver=$(podman image inspect -f '{{index .Labels "cubby.image-version"}}' "$IMAGE" 2>/dev/null || true)
-if [ "$rebuild" = 1 ] || [ "$have_ver" != "$want_ver" ]; then
-  [ -z "$have_ver" ] || [ "$have_ver" = "$want_ver" ] || log "image $IMAGE is version $have_ver; rebuilding as $want_ver"
-  log "building image $IMAGE ..."
-  podman build -q -t "$IMAGE" "$here/image" >&2
-  log "built $IMAGE"
+# ホストに依存しない。image/ の中身（Dockerfile など）のハッシュをラベル cubby.image-hash に
+# 記録し、中身が変わっていれば自動で作り直す（--rebuild なら常に作り直す）。
+img_hash=$(cd "$here/image" && find . -type f | LC_ALL=C sort | while IFS= read -r f; do
+             printf '%s  ' "$f"; sha256sum < "$f" | cut -d' ' -f1
+           done | sha256sum | cut -c1-16)
+have_hash=$(podman image inspect -f '{{index .Labels "cubby.image-hash"}}' "$IMAGE" 2>/dev/null || true)
+case "$have_hash" in '<no value>') have_hash= ;; esac
+if [ "$rebuild" = 1 ] || [ "$have_hash" != "$img_hash" ]; then
+  if [ "$rebuild" = 1 ]; then
+    log "rebuilding image $IMAGE (--rebuild) ..."
+  elif [ -n "$have_hash" ] || podman image exists "$IMAGE"; then
+    log "image/ (Dockerfile etc.) changed since $IMAGE was built; rebuilding ..."
+  else
+    log "building image $IMAGE ..."
+  fi
+  podman build -q --label cubby.image-hash="$img_hash" -t "$IMAGE" "$here/image" >&2
+  log "built $IMAGE (image/ hash $img_hash)"
 fi
 
 # rootless でコンテナが動き、ホストのユーザーが同じ名前・UID・ホームで使えるか（ctr-connect と同じ指定で）
@@ -243,6 +252,12 @@ for c in $(podman ps -a --filter label=ctr.managed=true --format '{{.Names}}' 2>
   [ "$(ctr_container_sig "$c")" = "$sig" ] || outdated="$outdated $c"
 done
 [ -z "$outdated" ] || warn "containers created with older mount settings:$outdated (apply with: ctr-recreate <name>)"
+# イメージを作り直したのに、古いイメージのままのコンテナを知らせる
+oldimg=
+for c in $(podman ps -a --filter label=ctr.managed=true --format '{{.Names}}' 2>/dev/null); do
+  ctr_image_outdated "$c" && oldimg="$oldimg $c"
+done
+[ -z "$oldimg" ] || warn "containers still using an older image:$oldimg (apply with: ctr-recreate <name>)"
 
 log "done (host id: ${CTR_HOST_ID:-unset})"
 printf 'CUBBY_USER %s\n' "$(id -un)"

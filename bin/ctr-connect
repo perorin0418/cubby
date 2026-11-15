@@ -133,6 +133,9 @@ else
   if [ "$cur_sig" != "$mount_sig" ]; then
     log "mount settings changed since $name was created; run 'ctr-recreate $name' on the host to apply them"
   fi
+  if ctr_image_outdated "$name" 9>&-; then
+    log "the image was rebuilt since $name was created; run 'ctr-recreate $name' on the host to use it"
+  fi
   if [ "$(podman container inspect -f '{{.State.Running}}' "$name" </dev/null 9>&-)" != true ]; then
     log "starting container $name"
     podman start "$name" </dev/null >/dev/null 9>&-

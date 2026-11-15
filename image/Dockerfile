@@ -1,7 +1,10 @@
 FROM docker.io/library/debian:bookworm-slim
 
-# イメージの版。setup-host.sh はこの値が期待と違うイメージを作り直す（作りが変わったときに上げる）。
-LABEL cubby.image-version="4"
+# このディレクトリ（image/）の中身を変えると、次の `cubby add-host <id>` で各ホストのイメージが
+# 自動で作り直される（中身のハッシュをイメージのラベル cubby.image-hash と比べる）。
+# 既存のコンテナへの反映は、ホストで `ctr-recreate <名前>`。
+# 必要なパッケージは下の apt-get install の行に足す。USER 行やユーザーの作成は書かないこと
+# （起動時にホストのユーザーを登録する ctr-entrypoint と食い違うため）。
 
 # 利用者のユーザーはイメージに作らない。コンテナの起動時に ctr-entrypoint が
 # ホストのログインユーザー（同じ名前・UID・GID・ホームのパス）を登録し、sudo を許可する。

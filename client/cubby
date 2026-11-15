@@ -2,7 +2,8 @@
 # cubby : 手元の PC（Windows・macOS・Linux）から、リモートホスト（複数可）を登録・管理する。
 # Windows では Git Bash で実行する（PowerShell・cmd からは cubby.ps1 / cubby.cmd）。
 #
-#   cubby add-host <id> [options]   リモートホストを登録し、ホストの環境を整える（何度実行してもよい）
+#   cubby add-host <id> [options]   リモートホストを登録し、ホストの環境を整える。登録の設定
+#                                   （接続先・ユーザー・鍵など）を変えるときも、これを実行し直す
 #       --hostname FQDN     ホストの実際の名前。指定すると ssh_config にホストの設定も書く
 #       --user USER         ホストのログインユーザー（--hostname と一緒に使う）
 #       --port N            ホストの SSH ポート（--hostname と一緒に使う）
@@ -22,6 +23,10 @@
 #       --unmount PATH      そのホストのパスのマウントをやめる（複数可）
 #                           ※既存のコンテナへの反映はホストで ctr-recreate <名前>
 #       --replace-hostkey   known_hosts の既存のホスト鍵と違っても置き換える
+#   cubby update [id...] [--rebuild] [--mount SPEC]... [--unmount PATH]... [--replace-hostkey]
+#                                   登録済みのホスト（省略時は全ホスト）を、登録時の設定のまま更新する。
+#                                   最新のスクリプトを転送し、image/（Dockerfile など）が変わっていれば
+#                                   イメージを自動で作り直す。マウントの追加・削除もこれで行う
 #   cubby hosts                     登録済みのホストを一覧する
 #   cubby list [id...]              各ホストのコンテナ・作業ディレクトリを一覧する（既定: 全ホスト）
 #   cubby preflight <id>            ホストの事前確認（何も変更しない）
@@ -263,6 +268,18 @@ cmd_add_host() {
   done
   identity=$(normpath "$identity")
   key=$(normpath "$key")
+  no_quote identity "$identity"; no_quote key "$key"
+  # cubby update が同じ設定で実行し直せるよう、登録の設定を管理ブロックに記録する
+  saved_args=
+  [ "$alias_name" = "$id" ] || saved_args="$saved_args --ssh-host $alias_name"
+  [ -z "$hostname" ]        || saved_args="$saved_args --hostname $hostname"
+  [ -z "$user" ]            || saved_args="$saved_args --user $user"
+  [ -z "$port" ]            || saved_args="$saved_args --port $port"
+  [ "$cloudflared" = 0 ]    || saved_args="$saved_args --cloudflared"
+  [ -z "$identity" ]        || saved_args="$saved_args --identity $(natpath "$identity")"
+  [ -z "$key" ]             || saved_args="$saved_args --key $(natpath "$key")"
+  [ -z "$wt" ]              || saved_args="$saved_args --work-root $wt"
+  [ "$gpu_mode" = auto ]    || saved_args="$saved_args --no-gpu"
   if [ -n "$identity" ]; then
     [ -r "$identity" ] || die "cannot read --identity $identity"
     # --key がなければ、--identity の公開鍵をコンテナにも登録する
@@ -317,6 +334,7 @@ cmd_add_host() {
 gen_block() {
     echo "# >>> cubby $id ssh-host=$alias_name gpu=$gpu_state >>>"
     echo "# managed by cubby (cubby add-host $id). Edits inside this block are overwritten."
+    echo "# cubby-args:$saved_args"
     echo "# コンテナ: ssh ctr-<作業名>.$id（GPU なし） / ssh gpu-<作業名>.$id（GPU あり。gpu=yes のホストのみ）"
     echo "Host ctr-*.$id gpu-*.$id"
     [ -n "$ctr_user" ] && echo "  User $ctr_user"
@@ -394,13 +412,13 @@ add_host_rest() {
   # 3. スクリプトを転送して setup-host.sh を実行する
   log "uploading scripts to $alias_name:~/$REMOTE_SHARE"
   tar -C "$here" -cf - bin host image config.env.example \
-    | rssh "$alias_name" "mkdir -p $REMOTE_SHARE && tar -xf - -C $REMOTE_SHARE"
+    | rssh "$alias_name" "mkdir -p $REMOTE_SHARE && rm -rf $REMOTE_SHARE/bin $REMOTE_SHARE/host $REMOTE_SHARE/image && tar -xf - -C $REMOTE_SHARE"
 
   find_pubkeys "$key" > "$tmp"
   args="--id $id --pubkeys - --gpu $gpu_mode$mount_args"
   [ -z "$wt" ] || args="$args --work-root $wt"
   [ "$rebuild" = 1 ] && args="$args --rebuild"
-  log "running setup-host.sh on $alias_name (the first run builds the image; this takes a while)"
+  log "running setup-host.sh on $alias_name (building the image takes a few minutes when needed)"
   rssh "$alias_name" "sh $REMOTE_SHARE/host/setup-host.sh $args" < "$tmp" > "$tmp.out" \
     || die "setup-host.sh failed on $alias_name"
 
@@ -436,7 +454,50 @@ add_host_rest() {
     log "GPU: not available on $id (connect as ctr-<name>.$id)"
   fi
 
-  log "done. try: ssh ctr-test.$id hostname"
+  log "done. try: ssh ctr-test.$id hostname   (later updates: cubby update $id)"
+}
+
+# 管理ブロックに記録した登録の設定（# cubby-args:）を読む。行がなければ失敗を返す。
+saved_args_of() {
+  awk -v id="$1" '
+    index($0, "# >>> cubby " id " ssh-host=") == 1 { inb = 1; next }
+    inb && $0 == "# <<< cubby " id " <<<"      { exit 1 }
+    inb && index($0, "# cubby-args:") == 1      { sub(/^# cubby-args:/, ""); print; found = 1; exit 0 }
+    END { if (!found) exit 1 }
+  ' "$SSH_CONFIG" 2>/dev/null
+}
+
+# cubby update [id...] [--rebuild] [--mount SPEC]... [--unmount PATH]... [--replace-hostkey]
+# 登録済みのホストを、登録時の設定のまま更新する（スクリプトの転送、image/ が変わっていれば
+# イメージの作り直し、鍵の追加、マウントの変更）。id を省略すると全ホスト。
+cmd_update() {
+  ids= extra=
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --rebuild|--replace-hostkey) extra="$extra $1"; shift ;;
+      --mount|--unmount)
+        [ $# -ge 2 ] || die "$1 needs a value"
+        no_quote "${1#--}" "$2"; extra="$extra $1 $2"; shift 2 ;;
+      --hostname|--user|--port|--cloudflared|--identity|--ssh-host|--key|--work-root|--no-gpu)
+          die "$1 is a registration setting; change it with: cubby add-host <id> ... $1 ...   (update reuses the registered settings)" ;;
+      -*) s=$(suggest_option "$1")
+          die "unknown option for update: $1${s:+ (did you mean $s ?)}" ;;
+      *)  valid_id "$1" || die "invalid id '$1'"; ids="$ids $1"; shift ;;
+    esac
+  done
+  [ -n "$ids" ] || ids=$(cubby_ids)
+  [ -n "$ids" ] || die "no hosts registered (cubby add-host <id> ...)"
+  failed=
+  for id in $ids; do
+    alias_of "$id" >/dev/null
+    args=$(saved_args_of "$id") \
+      || die "$id was registered by an older cubby; run 'cubby add-host $id ...' once with the original options"
+    log "== updating $id"
+    # 記録した値は引用符・空白を含まない（add-host で検証済み）ので、そのまま単語に分けてよい
+    # shellcheck disable=SC2086
+    ( set -f; set -- $args $extra; cmd_add_host "$id" "$@" ) || failed="$failed $id"
+  done
+  [ -z "$failed" ] || die "update failed for:$failed"
 }
 
 cmd_hosts() {
@@ -494,6 +555,7 @@ cmd_remove_host() {
 sub=${1:-}; [ $# -gt 0 ] && shift
 case "$sub" in
   add-host)    cmd_add_host "$@" ;;
+  update)      cmd_update "$@" ;;
   hosts)       cmd_hosts ;;
   list)        cmd_list "$@" ;;
   preflight)   cmd_preflight "$@" ;;
