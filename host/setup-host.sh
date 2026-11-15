@@ -76,18 +76,23 @@ keep CTR_REPO "$repo_arg" "$REPO"
 keep CTR_WT_ROOT "$wt_arg" "$WT_ROOT"
 
 # 元リポジトリ（なければ clone する。ssh の URL は手元から転送された ssh-agent で認証する）
-if [ ! -d "$REPO/.git" ]; then
-  [ -n "$repo_url" ] || die "$REPO/.git not found; pass --repo-url to clone it, or --repo to use another path"
-  if [ -d "$REPO" ] && [ -n "$(ls -A "$REPO" 2>/dev/null)" ]; then
-    die "$REPO exists and is not empty, but is not a git repository"
+# CTR_REPO=none はリポジトリのないホスト（すべての作業が git なし）
+if [ "$REPO" = none ]; then
+  log "no repository on this host (CTR_REPO=none); all work directories are plain directories"
+else
+  if [ ! -d "$REPO/.git" ]; then
+    [ -n "$repo_url" ] || die "$REPO/.git not found; pass --repo-url to clone it, --repo to use another path, or --no-repo for work without git"
+    if [ -d "$REPO" ] && [ -n "$(ls -A "$REPO" 2>/dev/null)" ]; then
+      die "$REPO exists and is not empty, but is not a git repository"
+    fi
+    log "cloning $repo_url into $REPO"
+    GIT_SSH_COMMAND='ssh -o StrictHostKeyChecking=accept-new' \
+      git clone -q "$repo_url" "$REPO" </dev/null >&2 || die "git clone failed"
   fi
-  log "cloning $repo_url into $REPO"
-  GIT_SSH_COMMAND='ssh -o StrictHostKeyChecking=accept-new' \
-    git clone -q "$repo_url" "$REPO" </dev/null >&2 || die "git clone failed"
+  [ -w "$REPO/.git" ] || die "$REPO/.git is not writable by $(id -un)"
+  [ "$(stat -c %u "$REPO/.git")" = "$(id -u)" ] \
+    || warn "$REPO/.git is not owned by $(id -un); the container user dev (uid $(id -u)) may fail to write"
 fi
-[ -w "$REPO/.git" ] || die "$REPO/.git is not writable by $(id -un)"
-[ "$(stat -c %u "$REPO/.git")" = "$(id -u)" ] \
-  || warn "$REPO/.git is not owned by $(id -un); the container user dev (uid $(id -u)) may fail to write"
 
 # ホスト鍵（rootless なのでログインユーザー所有。既にあれば作り直さない）
 mkdir -p "$HOSTKEYS" "$AUTHKEYS"

@@ -10,8 +10,8 @@
 # 片付け（テスト 12 の後半＝実際の削除）は --cleanup を付けたときだけ行う。ブランチは消さない。
 #
 # 環境変数:
-#   CTR_REPO         ホストの元リポジトリ             （既定 /srv/project）
-#   CTR_WT_ROOT      ホストの worktree の置き場       （既定 /srv/worktrees）
+#   CTR_REPO         ホストの元リポジトリ             （既定: ホストの config.env の値）
+#   CTR_WT_ROOT      ホストの worktree の置き場       （既定: ホストの config.env の値）
 #   CTR_SMOKE_NAME   テスト用の名前                   （既定 ctr-smoke）
 #   CUBBY_SSH_DIR    cubby と同じく ~/.ssh 以外を使うとき
 set -u
@@ -27,11 +27,8 @@ here=$(cd "$(dirname "$0")/.." && pwd)
 REMOTE=$(cubby_alias_of "$ID")
 [ -n "$REMOTE" ] || { echo "host $ID is not registered in $SSH_CONFIG; run: client/cubby add-host $ID ..." >&2; exit 2; }
 RBIN=.local/bin
-REPO=${CTR_REPO:-/srv/project}
-WT_ROOT=${CTR_WT_ROOT:-/srv/worktrees}
 NAME=${CTR_SMOKE_NAME:-ctr-smoke}
 CONN="$NAME.$ID"
-WT="$WT_ROOT/$NAME"
 
 pass=0; fail=0; skip=0
 ok()   { pass=$((pass + 1)); printf 'PASS  %s\n' "$*"; }
@@ -49,6 +46,15 @@ count_containers() {
   remote "podman ps -aq --filter label=ctr.name=$NAME | wc -l" | tr -d ' \r'
 }
 
+# ホストの設定（元リポジトリ・worktree の置き場）を読む。環境変数があればそちらを優先する。
+hostconf() {
+  remote "sed -n 's/^$1=//p' \"\${XDG_CONFIG_HOME:-\$HOME/.config}/cubby/config.env\" 2>/dev/null | tail -n 1" | tr -d '\r'
+}
+REPO=${CTR_REPO:-$(hostconf CTR_REPO)}; REPO=${REPO:-/srv/project}
+WT_ROOT=${CTR_WT_ROOT:-$(hostconf CTR_WT_ROOT)}; WT_ROOT=${WT_ROOT:-/srv/worktrees}
+WT="$WT_ROOT/$NAME"
+norepo=0; [ "$REPO" = none ] && norepo=1
+
 echo "== smoke test: $CONN via $REMOTE =="
 
 # 前提: テスト用の名前がまだ使われていないこと（テスト 3 を新規作成で確かめるため）
@@ -60,7 +66,7 @@ fi
 
 # 1. 不正な名前を拒否する（終了コード 2）
 t1=ok
-for bad in "'bad name'" "ctr-UPPER" "ctr-x.other-host" "ctr-x.a.b" "'ctr-a
+for bad in "'bad name'" "ctr-UPPER" "ctr-x.other-host" "ctr-x.a.b" "ctr-x.bogus.$ID" "ctr-x..$ID" "'ctr-a
 b'" "x-foo" "ctr-" "ctr--x" "ctr-a/b" "ctr-$(printf 'a%.0s' $(seq 1 41))"; do
   remote "$RBIN/ctr-connect $bad </dev/null >/dev/null 2>&1; echo \$?" > /tmp/ctr-smoke.$$ 2>&1
   rc=$(tr -d '\r' < /tmp/ctr-smoke.$$)
@@ -72,7 +78,11 @@ rm -f /tmp/ctr-smoke.$$
 # 3. 同名の同時接続でコンテナが 1 つ（新規作成の競合）
 remote "for i in 1 2; do (timeout 30 $RBIN/ctr-connect $NAME </dev/null 2>/dev/null | head -c 8 >/dev/null) & done; wait" >/dev/null 2>&1
 n=$(count_containers)
-nwt=$(remote "git -C '$REPO' worktree list --porcelain | grep -c '^worktree $WT\$'" | tr -d '\r')
+if [ "$norepo" = 1 ]; then
+  nwt=$(remote "test -d '$WT' && ! test -e '$WT/.git' && echo 1 || echo 0" | tr -d '\r')
+else
+  nwt=$(remote "git -C '$REPO' worktree list --porcelain | grep -c '^worktree $WT\$'" | tr -d '\r')
+fi
 if [ "$n" = 1 ] && [ "$nwt" = 1 ]; then
   ok "3 concurrent connects create exactly one container and one worktree"
 else
@@ -95,6 +105,17 @@ n=$(count_containers)
 h=$(cssh hostname 2>/dev/null | tr -d '\r')
 [ "$h" = "$NAME" ] && ok "4 ssh $CONN hostname -> $h" || ng "4 ssh $CONN hostname -> $h"
 
+if [ "$norepo" = 1 ]; then
+# 5n. リポジトリのないホスト: 作業ディレクトリはただのディレクトリで、書いたものがホストから見える
+if cssh "cd '$WT' && test ! -e .git && echo hi > ctr-smoke-file" >/dev/null 2>&1 \
+   && [ "$(remote "cat '$WT/ctr-smoke-file'" | tr -d '\r')" = hi ]; then
+  ok "5n work directory is a plain directory (no .git) and the host sees files written in it"
+else
+  ng "5n plain work directory"
+fi
+remote "rm -f '$WT/ctr-smoke-file'"
+sk "5/5b/5c/6 git tests (this host has no repository)"
+else
 # 5. worktree で commit でき、ホストから見える
 msg="ctr-smoke $(date +%s)"
 if out=$(cssh "cd '$WT' && git -c user.name=ctr-smoke -c user.email=ctr-smoke@invalid commit --allow-empty -q -m '$msg' && git log -1 --format=%s" 2>&1); then
@@ -133,6 +154,42 @@ else
   ok "6 cannot write $REPO/README.md from container"
 fi
 
+# N. 同じホストで git なしの作業（接続名に .nogit）
+NG="$NAME-ng"
+if remote "test -e '$WT_ROOT/$NG'" || [ "$(remote "podman ps -aq --filter label=ctr.name=$NG | wc -l" | tr -d ' \r')" != 0 ]; then
+  sk "N1-N3 $NG already exists on $REMOTE"
+else
+  out=$(rssh -o BatchMode=yes "$NG.nogit.$ID" "cd '$WT_ROOT/$NG' && pwd; test -e .git && echo HAS_GIT; echo hi > note.txt; hostname" </dev/null 2>/dev/null | tr -d '\r')
+  if printf '%s\n' "$out" | grep -qx "$WT_ROOT/$NG" && ! printf '%s\n' "$out" | grep -q HAS_GIT \
+     && printf '%s\n' "$out" | grep -qx "$NG" \
+     && ! remote "git -C '$REPO' show-ref --verify --quiet refs/heads/$NG"; then
+    ok "N1 $NG.nogit.$ID works in a plain directory (no .git, no branch created)"
+  else
+    ng "N1 $NG.nogit.$ID: $out"
+  fi
+  r1=$(remote "$RBIN/ctr-connect $NAME.nogit.$ID </dev/null >/dev/null 2>&1; echo \$?" | tr -d '\r')
+  r2=$(remote "$RBIN/ctr-connect $NG.$ID </dev/null >/dev/null 2>&1; echo \$?" | tr -d '\r')
+  if [ "$r1" = 2 ] && [ "$r2" = 2 ]; then
+    ok "N2 connecting with the other kind is refused (git worktree via .nogit, plain dir without it)"
+  else
+    ng "N2 kind mismatch: $NAME.nogit -> $r1, $NG (no .nogit) -> $r2"
+  fi
+  remote "$RBIN/ctr-remove -y $NG" >/dev/null 2>&1; rc=$?
+  if [ "$rc" != 0 ] && remote "test -f '$WT_ROOT/$NG/note.txt'"; then
+    ok "N3a ctr-remove refuses a non-empty plain work directory"
+  else
+    ng "N3a ctr-remove on non-empty plain dir: exit=$rc"
+  fi
+  if [ "$cleanup" = 1 ]; then
+    if remote "$RBIN/ctr-remove -y --force $NG" >/dev/null 2>&1 && ! remote "test -e '$WT_ROOT/$NG'"; then
+      ok "N3b ctr-remove --force removes the plain work directory"
+    else
+      ng "N3b ctr-remove --force $NG"
+    fi
+  fi
+fi
+fi
+
 # 11. コンテナを作り直しても接続でき、ホームが残る
 cssh 'echo keep > ~/.ctr-smoke-marker' >/dev/null 2>&1
 remote "podman rm -f $NAME >/dev/null"
@@ -169,7 +226,7 @@ remote "echo x > '$WT/ctr-smoke-untracked'"
 remote "$RBIN/ctr-remove -y $NAME" >/dev/null 2>&1
 rc=$?
 if [ "$rc" != 0 ] && remote "test -d '$WT'" && [ "$(count_containers)" = 1 ]; then
-  ok "12a ctr-remove stops on uncommitted changes and removes nothing"
+  ok "12a ctr-remove stops on uncommitted changes / a non-empty work dir and removes nothing"
 else
   ng "12a ctr-remove with uncommitted changes: exit=$rc"
 fi

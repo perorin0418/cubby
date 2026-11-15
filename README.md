@@ -4,6 +4,7 @@ Claude Desktop の SSH 接続で、**接続名ごとに専用のコンテナ**�
 
 - 接続名は `ctr-<作業名>.<ホストID>`（例 `ctr-feature1.lab1`）。ドットの後ろでホストを選びます。
 - **GPU を使うコンテナ**は、接続名の先頭を `gpu-` にするだけです（例 `gpu-train.lab1`）。GPU が使えるホストかどうかは自動で判定します。
+- **git を使わない作業**は、接続名に `.nogit` を入れます（例 `ctr-notes.nogit.lab1`）。リポジトリのないホストも作れます（`--no-repo`）。
 - 同じ接続名なら、何度つないでも同じコンテナに戻ります。
 - 違う接続名なら、別のコンテナ・別の作業ディレクトリ（git worktree）になります。
 - 新しいコンテナがほしいときは、Desktop に新しい名前の SSH 接続を追加するだけです。
@@ -176,6 +177,26 @@ sh client/cubby hosts
 - コンテナにはホストのドライバのライブラリと `nvidia-smi` が入ります。CUDA Toolkit は入れていないので、PyTorch など CUDA を同梱するパッケージを使うか、コンテナ内で入れてください。
 - **AMD の GPU** は自動では準備しません。ホストの `~/.config/cubby/config.env` に `CTR_GPU_ARGS="--device /dev/kfd --device /dev/dri --group-add keep-groups"` のように書いて `cubby add-host` を再実行すると、その指定で起動できるかを確かめ、`gpu-` の接続で使えるようになります。
 
+## git を使わない作業
+
+作業ディレクトリを git worktree ではなく、**ただのディレクトリ**にできます（ブランチを作らず、元リポジトリもマウントしません）。
+
+| 方法 | 対象 | 例 |
+|---|---|---|
+| 接続名に `.nogit` を入れる | その作業だけ（同じホストで git の作業と混在できる） | `ctr-notes.nogit.lab1`、`gpu-exp.nogit.lab1` |
+| `cubby add-host <id> --no-repo` | そのホストのすべての作業（`.nogit` は書かなくてよい。リポジトリの clone も不要） | `ctr-notes.lab2` |
+
+```sh
+# リポジトリのないホストを登録する
+sh client/cubby add-host lab2 --hostname lab2.example.com --user alice --cloudflared --no-repo
+```
+
+- 作業ディレクトリは git の作業と同じ場所（`/srv/worktrees/ctr-notes` など）にでき、ホストからも見えます。ホーム・GPU・追加マウントなどはほかの作業と同じです。
+- 作業ディレクトリの種類は最初の接続で決まります。同じ名前で違う種類（git の作業に `.nogit` を付ける、またはその逆）でつなぐと、何も変えずに断ります。
+- SSH でログインした直後の場所はホーム（`/home/dev`）です。作業ディレクトリへは `cd /srv/worktrees/<名前>` で移ります（git の作業と同じ）。
+- **片付けの違い**: git なしの作業には未コミットの変更を検出する仕組みがないため、`ctr-remove` は**作業ディレクトリが空でない限り消しません**（中身を表示して止まります）。必要なものを移してから再実行するか、`--force` で中身ごと消してください。
+- 既存のホストを `--no-repo` に切り替えることはしません（既存の設定値は変えない方針）。切り替える場合はホストの `~/.config/cubby/config.env` を `CTR_REPO=none` に書き換えてください。
+
 ## ホストのディレクトリを毎回マウントする
 
 データセットやキャッシュなど、ホストのディレクトリを**そのホストの全コンテナ**（`ctr-` も `gpu-` も）に毎回マウントできます。
@@ -213,7 +234,7 @@ ctr-remove -y ctr-feature1       # 確認を省略
 ctr-remove --force ctr-feature1  # 未コミットの変更があっても worktree を消す
 ```
 
-コンテナ → worktree → ホームのボリュームの順で消します。**未コミットの変更があると、何も消さずに止まります**。ブランチは消しません。
+コンテナ → worktree → ホームのボリュームの順で消します。**未コミットの変更があると、何も消さずに止まります**。ブランチは消しません。git なしの作業では、**作業ディレクトリが空でないと何も消さずに止まります**（`--force` で中身ごと消します）。
 
 手元の登録だけを消すには `sh client/cubby remove-host lab1`（`~/.ssh/config` の cubby ブロックと known_hosts の `cubby-lab1` を消します。ホスト上のものは残ります）。
 
@@ -223,7 +244,6 @@ ctr-remove --force ctr-feature1  # 未コミットの変更があっても workt
 sh client/cubby preflight lab1                     # ホストの事前確認（変更しない）
 sh tests/smoke.sh lab1                             # テスト用の ctr-smoke を作って確認する
 sh tests/smoke.sh lab1 --cleanup                   # 最後に ctr-remove で片付ける（ブランチは残る）
-CTR_WT_ROOT=/home/alice/worktrees sh tests/smoke.sh lab2   # worktree の置き場が既定と違うとき
 ```
 
 Desktop での確認（セッションがコンテナ内で動く・再起動後に戻る・別名で別コンテナ・同時に動かしても干渉しない）は手作業で行います。手順は [docs/handoff-ctr-connect.md](docs/handoff-ctr-connect.md) の 6.6 を参照してください。
@@ -238,6 +258,9 @@ Desktop での確認（セッションがコンテナ内で動く・再起動後
 | `accepts only public keys` | ホストがパスワード認証を許可していない。最初の鍵の登録だけ別の手段で行う |
 | `this host has no usable GPU` | `cubby hosts` の `gpu=`。ホストで `nvidia-smi` が通るか（ドライバ）。通るなら `cubby add-host` を再実行 |
 | コンテナにマウントが見えない | `ctr-list` の extra mounts（ホストにないパスは飛ばされる）。設定を変えた後なら `ctr-recreate <名前>` |
+| `already exists as a git worktree` / `as a plain directory` | 同じ名前で違う種類の作業につないだ。`.nogit` の有無を最初と揃えるか、別の名前にする |
+| `unknown option '...'` | 接続名のドットの間に書けるのは `nogit` だけ（`ctr-<作業名>[.nogit].<ホストID>`） |
+| `$REPO/.git not found` | 元リポジトリがない。`--repo-url` で clone するか、git を使わないなら `--no-repo` |
 | `mount settings changed since ...` | マウントの設定が変わった。反映するならホストで `ctr-recreate <名前>` |
 | `gpu=no` なのに GPU がある | ドライバの更新後なら `cubby add-host` の再実行で CDI の定義を作り直す。`add-host` の出力の `WARNING`（toolkit の導入や `nvidia-ctk cdi generate` の失敗） |
 | `ssh ctr-x.<id>` が `kex_exchange_identification` などで即切れる | `ssh <host> '.local/bin/ctr-connect ctr-x.<id> </dev/null \| head -c 8'` が `SSH-2.0-` を返すか。標準エラー出力の `ctr-connect:` のメッセージ |
@@ -273,6 +296,8 @@ Desktop での確認（セッションがコンテナ内で動く・再起動後
 | ホストの事前準備（docker・git の導入、ディレクトリ作成）は手作業 | `cubby add-host` が必要なときだけ sudo で自動実行（`host/bootstrap-root.sh`） | 利用者の要望 |
 | ホストへのログインは鍵認証が前提 | パスワード認証のホストでも、`add-host` が初回に公開鍵を登録する | 利用者の要望 |
 | GPU の扱いなし | 接続名 `gpu-<作業名>` で GPU 付きコンテナ（CDI `nvidia.com/gpu=all`）。NVIDIA Container Toolkit と CDI の定義を自動で準備し、使えるホストかを自動判定 | 利用者の要望 |
+| 作業ディレクトリは必ず git worktree | 接続名の `.nogit`、またはホストの `--no-repo`（`CTR_REPO=none`）で git なしのディレクトリ。git なしの作業は空でなければ `ctr-remove` が止まる | 利用者の要望 |
+| — | `~/.ssh/config` は別のファイルに書いてから置き換える | 書き換え中のファイルを別の ssh が読んで失敗したため（検証で判明。Windows では Permission denied になる） |
 | マウントは repo の `.git`・worktree・ホーム・鍵のみ | ホストごとの `~/.config/cubby/mounts` で任意のディレクトリを全コンテナにマウント。`cubby add-host --mount/--unmount`、反映は `ctr-recreate` | 利用者の要望 |
 | — | `~/.ssh/config` の書き換えを mkdir のロックで排他する | 複数の `add-host` を同時に動かすと互いのブロックを上書きしたため（検証で判明） |
 | `docker run --init` | イメージに tini を入れて PID 1 にする | ホストの catatonit の有無に依存しないため |

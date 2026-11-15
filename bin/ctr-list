@@ -39,5 +39,19 @@ if [ -n "$outdated" ]; then
   echo "  (apply with: ctr-recreate <name>)"
 fi
 echo
-echo "== worktrees ($REPO) =="
-git -C "$REPO" worktree list
+WT_ROOT=${CTR_WT_ROOT:-/srv/worktrees}
+if [ "$REPO" = none ]; then
+  echo "== worktrees: none (this host has no repository; all work directories are plain) =="
+else
+  echo "== worktrees ($REPO) =="
+  git -C "$REPO" worktree list
+fi
+echo
+echo "== work directories without git ($WT_ROOT) =="
+found=0
+for d in "$WT_ROOT"/ctr-* "$WT_ROOT"/gpu-*; do
+  [ -d "$d" ] && [ ! -e "$d/.git" ] || continue
+  found=1
+  echo "  $d"
+done
+[ "$found" = 1 ] || echo "  (none)"

@@ -1,5 +1,5 @@
 #!/bin/sh
-# ctr-connect <ctr|gpu>-<work>[.<host-id>]
+# ctr-connect <ctr|gpu>-<work>[.nogit][.<host-id>]
 #
 # ~/.ssh/config の ProxyCommand から呼ばれる。接続名のコンテナと worktree を用意し
 # （なければ作る・止まっていれば起動する）、コンテナ内の sshd と標準入出力をつなぐ。
@@ -11,6 +11,11 @@
 # ホストID が一致しない接続は拒否する（接続先の取り違え防止）。
 # gpu- のコンテナには CTR_GPU_ARGS（既定: NVIDIA の CDI デバイス nvidia.com/gpu=all）を付ける。
 # setup-host.sh がこのホストで GPU を使えないと判定した場合（detected.env）は拒否する。
+#
+# git を使わない作業: 接続名に .nogit を入れる（例 ctr-notes.nogit.lab1）か、ホストの
+# CTR_REPO=none（cubby add-host --no-repo）のとき、作業ディレクトリは git worktree ではなく
+# ただのディレクトリになる（ブランチを作らず、.git もマウントしない）。
+# 作業ディレクトリの種類は最初に作ったときに決まる。既存のものと違う種類での接続は拒否する。
 #
 # 重要: 標準出力は SSH の通信路そのもの。ログ・git・podman の出力は必ず標準エラー出力へ出す。
 #       また、準備中のコマンドが SSH の入力を読み取らないよう、標準入力は /dev/null にする。
@@ -46,8 +51,6 @@ log() { printf 'ctr-connect: %s\n' "$*" >&2; }
 # 改行やドットは [a-z0-9-] に含まれないので弾かれる。
 full=${1:-}
 name=${full%%.*}
-suffix=
-[ "$name" = "$full" ] || suffix=${full#*.}
 case "$name" in
   ''|*[!a-z0-9-]*) log "invalid name: $full"; exit 2 ;;
   ctr-[a-z0-9]*|gpu-[a-z0-9]*) ;;
@@ -56,14 +59,34 @@ esac
 [ "${#name}" -le 44 ] || { log "name too long: $name"; exit 2; }
 gpu=no
 case "$name" in gpu-*) gpu=yes ;; esac
+# ドット以降: [オプション.]...<ホストID>。オプションは nogit だけ。
+nogit=no
 if [ "$name" != "$full" ]; then
-  case "$suffix" in
+  rest=${full#*.}
+  case "$rest" in ''|.*|*.|*..*|*[!a-z0-9.-]*) log "invalid name: $full"; exit 2 ;; esac
+  hostpart=${rest##*.}
+  opts=
+  [ "$rest" = "$hostpart" ] || opts=${rest%.*}
+  # ホストID を省略した ctr-x.nogit
+  if [ -z "$opts" ] && [ "$hostpart" = nogit ]; then opts=nogit hostpart=${HOST_ID:-nogit}; fi
+  case "$hostpart" in
     ''|*[!a-z0-9-]*) log "invalid host id: $full"; exit 2 ;;
   esac
-  if [ -n "$HOST_ID" ] && [ "$suffix" != "$HOST_ID" ]; then
-    log "host id mismatch: $suffix (this host is $HOST_ID)"; exit 2
+  if [ -n "$opts" ]; then
+    for o in $(printf '%s' "$opts" | tr '.' ' '); do
+      case "$o" in
+        nogit) nogit=yes ;;
+        *) log "unknown option '$o' in $full (only .nogit is supported)"; exit 2 ;;
+      esac
+    done
+    case "$opts" in *[!a-z.]*|.*|*.|*..*) log "invalid name: $full"; exit 2 ;; esac
+  fi
+  if [ -n "$HOST_ID" ] && [ "$hostpart" != "$HOST_ID" ]; then
+    log "host id mismatch: $hostpart (this host is $HOST_ID)"; exit 2
   fi
 fi
+# リポジトリのないホスト（CTR_REPO=none）では、すべて git なし
+[ "$REPO" != none ] || nogit=yes
 
 if [ "$gpu" = yes ] && [ "$GPU_AVAILABLE" != yes ]; then
   log "this host has no usable GPU (${HOST_ID:-$(hostname)}); connect as ctr-${name#gpu-} instead, or rerun cubby add-host after installing the GPU driver"
@@ -80,7 +103,23 @@ mkdir -p "$LOCK_DIR"
 exec 9>"$LOCK_DIR/$name.lock"
 flock -w 60 9 || { log "lock timeout: $name"; exit 1; }
 
-if [ ! -d "$wt" ]; then
+if [ -d "$wt" ]; then
+  # 既存の作業ディレクトリの種類（worktree には .git ファイルがある）と、要求が違えば断る
+  if [ -e "$wt/.git" ] && [ "$nogit" = yes ]; then
+    if [ "$REPO" = none ]; then
+      log "$wt is a git worktree, but this host is configured without a repository"
+    else
+      log "$name already exists as a git worktree; connect without .nogit (or use another name)"
+    fi
+    exit 2
+  elif [ ! -e "$wt/.git" ] && [ "$nogit" = no ]; then
+    log "$name already exists as a plain directory (no git); connect as $name.nogit.${HOST_ID:-<host-id>} (or use another name)"
+    exit 2
+  fi
+elif [ "$nogit" = yes ]; then
+  log "creating work directory $wt (no git)"
+  mkdir -p "$wt"
+else
   if git -C "$REPO" show-ref --verify --quiet "refs/heads/$name" </dev/null 9>&-; then
     log "creating worktree $wt (existing branch $name)"
     git -C "$REPO" worktree add "$wt" "$name" </dev/null 1>&2 9>&-
@@ -100,10 +139,12 @@ fi
 # 追加マウント（~/.config/cubby/mounts）。ホストにないパスは警告して飛ばす。
 mount_sig=$(ctr_mount_sig)
 if ! podman container exists "$name" </dev/null 9>&-; then
-  log "creating container $name (gpu: $gpu)"
+  log "creating container $name (gpu: $gpu, git: $([ "$nogit" = yes ] && echo no || echo yes))"
   set --
   # shellcheck disable=SC2086
   [ "$gpu" = yes ] && set -- $GPU_ARGS
+  # git の作業なら元リポジトリの .git だけをマウントする（worktree の .git ファイルがここを指す）
+  [ "$nogit" = yes ] || set -- "$@" -v "$REPO/.git:$REPO/.git"
   while IFS= read -r spec; do
     [ -n "$spec" ] || continue
     set -- "$@" -v "$spec"
@@ -119,7 +160,6 @@ EOF
     --security-opt label=disable \
     --restart unless-stopped \
     -v "$name-home:/home/dev" \
-    -v "$REPO/.git:$REPO/.git" \
     -v "$wt:$wt" \
     -v "$HOSTKEYS:/etc/ssh/ctr-hostkeys:ro" \
     -v "$AUTHKEYS:/etc/ssh/ctr-authorized_keys:ro" \

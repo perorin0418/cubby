@@ -18,8 +18,10 @@ run sh -c '. /etc/os-release 2>/dev/null && echo "$PRETTY_NAME"'
 run podman version
 run git --version
 run id
-run stat -c '%U %u %G %g %n' "$REPO" "$REPO/.git"
-run df -h "$HOME" "$REPO"
+if [ "$REPO" != none ]; then
+  run stat -c '%U %u %G %g %n' "$REPO" "$REPO/.git"
+  run df -h "$HOME" "$REPO"
+fi
 
 printf '\n== checks ==\n'
 chk() { if eval "$2"; then echo "OK   $1"; else echo "NG   $1${3:+ -- $3}"; fi; }
@@ -30,8 +32,12 @@ chk "podman runs rootless" "[ \"\$(podman info --format '{{.Host.Security.Rootle
 chk "/etc/subuid has $(id -un)" "grep -q '^$(id -un):' /etc/subuid 2>/dev/null" "needed for --userns=keep-id"
 chk "linger is enabled" "[ \"\$(loginctl show-user $(id -un) -p Linger --value 2>/dev/null)\" = yes ]" \
     "sudo loginctl enable-linger $(id -un)"
-chk "$REPO/.git exists and is writable" "[ -w '$REPO/.git' ]"
-chk "$REPO/.git is owned by $(id -un)" "[ \"\$(stat -c %u '$REPO/.git' 2>/dev/null)\" = $(id -u) ]"
+if [ "$REPO" = none ]; then
+  echo "--   no repository on this host (CTR_REPO=none; work without git)"
+else
+  chk "$REPO/.git exists and is writable" "[ -w '$REPO/.git' ]"
+  chk "$REPO/.git is owned by $(id -un)" "[ \"\$(stat -c %u '$REPO/.git' 2>/dev/null)\" = $(id -u) ]"
+fi
 if [ -d "$WT_ROOT" ]; then
   chk "$WT_ROOT is writable" "[ -w '$WT_ROOT' ]"
 else

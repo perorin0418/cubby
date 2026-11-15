@@ -13,6 +13,8 @@
 #                           設定を使うときに指定する（既定は <id>）
 #       --key FILE          コンテナに登録する公開鍵（既定: ~/.ssh/id_ed25519.pub など）
 #       --repo PATH         ホストの元リポジトリ（既定 /srv/project）
+#       --no-repo           リポジトリのないホストにする（すべての作業が git なしのディレクトリ）。
+#                           git ありのホストでも、接続名に .nogit を入れればその作業だけ git なし
 #       --repo-url URL      元リポジトリがなければ、この URL から clone する
 #                           （ssh の URL は手元の ssh-agent を転送して認証する）
 #       --worktrees PATH    ホストの worktree の置き場（既定 /srv/worktrees）
@@ -44,6 +46,7 @@
 #
 # 接続名は ctr-<作業名>.<id>（GPU なし。例 ctr-feature1.lab1）、または
 # gpu-<作業名>.<id>（GPU あり。GPU が使えるホストのみ。例 gpu-train.lab1）。
+# git を使わない作業は .nogit を入れる（例 ctr-notes.nogit.lab1）。
 set -eu
 
 here=$(cd "$(dirname "$0")/.." && pwd)
@@ -93,10 +96,22 @@ write_block() {
   config_lock
   cp "$SSH_CONFIG" "$SSH_CONFIG.cubby.bak"
   config_without_block "$1" > "$SSH_CONFIG.cubby.tmp"
-  { cat "$2"; echo; cat "$SSH_CONFIG.cubby.tmp"; } > "$SSH_CONFIG"
+  { cat "$2"; echo; cat "$SSH_CONFIG.cubby.tmp"; } > "$SSH_CONFIG.cubby.new"
   rm -f "$SSH_CONFIG.cubby.tmp"
-  chmod 600 "$SSH_CONFIG" 2>/dev/null || true
+  chmod 600 "$SSH_CONFIG.cubby.new" 2>/dev/null || true
+  replace_config "$SSH_CONFIG.cubby.new"
   config_unlock
+}
+
+# 書き換え途中の ~/.ssh/config を ssh が読まないよう、別のファイルに書いてから置き換える。
+# Windows では ssh が開いている間は置き換えに失敗することがあるので、少し待って再試行する。
+replace_config() {
+  i=0
+  until mv -f "$1" "$SSH_CONFIG" 2>/dev/null; do
+    i=$((i + 1))
+    [ "$i" -lt 50 ] || { rm -f "$1"; config_unlock; die "could not replace $SSH_CONFIG (in use?)"; }
+    sleep 0.1
+  done
 }
 
 # ~/.ssh/config の書き換えを排他する（複数の add-host を同時に動かしても互いに上書きしない）。
@@ -135,7 +150,7 @@ ensure_key_auth() {
     return 0
   fi
   case "$errs" in
-    *'Permission denied'*) ;;
+    *'Permission denied ('*) ;;   # ssh の認証失敗（Permission denied (publickey,password).）
     *) printf '%s\n' "$errs" >&2
        die "cannot ssh to $a. Check the host name, network, and cloudflared login" ;;
   esac
@@ -193,6 +208,7 @@ cmd_add_host() {
       --key)             key=$2; shift 2 ;;
       --repo)            repo=$2; shift 2 ;;
       --repo-url)        repo_url=$2; shift 2 ;;
+      --no-repo)         repo=none; shift ;;
       --worktrees)       wt=$2; shift 2 ;;
       --rebuild)         rebuild=1; shift ;;
       --replace-hostkey) replace=1; shift ;;
@@ -283,6 +299,9 @@ add_host_rest() {
     wt=${wt:-/srv/worktrees}
   fi
   no_quote repo "$repo"; no_quote worktrees "$wt"
+  if [ "$repo" = none ] && [ -n "$repo_url" ]; then
+    die "--repo-url cannot be used on a host without a repository (--no-repo / CTR_REPO=none)"
+  fi
 
   # 2. root が要る準備（済んでいれば sudo は使わない）
   rssh "$alias_name" 'mkdir -p .cache/cubby && cat > .cache/cubby/bootstrap-root.sh' \
@@ -416,7 +435,8 @@ cmd_remove_host() {
   if [ -e "$SSH_CONFIG" ]; then
     config_lock
     cp "$SSH_CONFIG" "$SSH_CONFIG.cubby.bak"
-    config_without_block "$id" > "$SSH_CONFIG.cubby.tmp" && mv -f "$SSH_CONFIG.cubby.tmp" "$SSH_CONFIG"
+    config_without_block "$id" > "$SSH_CONFIG.cubby.new"
+    replace_config "$SSH_CONFIG.cubby.new"
     config_unlock
   fi
   rm -f "$SSH_DIR/cubby/$id.conf"

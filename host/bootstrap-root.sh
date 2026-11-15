@@ -139,6 +139,7 @@ if [ "$check" = 1 ]; then
   if linger_needed; then need="$need linger"; fi
   g=$(gpu_needs); [ -z "$g" ] || need="$need gpu($g)"
   for d in "$repo" "$wt"; do
+    [ "$d" != none ] || continue
     set +e; dir_state "$d"; s=$?; set -e
     case $s in
       1) need="$need mkdir($d)" ;;
@@ -220,6 +221,7 @@ fi
 
 # ディレクトリ（なければ USER 所有で作る。既存のものは変えない）
 for d in "$repo" "$wt"; do
+  [ "$d" != none ] || continue
   set +e; dir_state "$d"; s=$?; set -e
   case $s in
     1) install -d -o "$user" -m 755 "$d"; log "created $d (owner $user)" ;;
