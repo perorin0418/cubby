@@ -34,6 +34,17 @@ echo "== containers (label ctr.managed=true) =="
 podman ps -a --filter label=ctr.managed=true \
   --format 'table {{.Names}}\t{{.Status}}\t{{.Image}}\t{{.CreatedAt}}'
 echo
+echo "== task containers (cubby-task; removed after ${CTR_TASK_TTL_HOURS:-72}h unused, folders are kept) =="
+found=0
+now=$(date +%s)
+for t in $(podman ps -a --filter label=cubby.task=true --format '{{.Names}}'); do
+  found=1
+  stamp=$(podman container inspect -f '{{index .Config.Labels "cubby.task.stamp"}}' "$t" 2>/dev/null || true)
+  if [ -n "$stamp" ] && [ -e "$stamp" ]; then last=$(stat -c %Y "$stamp"); else last=$(podman container inspect -f '{{.Created.Unix}}' "$t"); fi
+  printf '  %-36s %-8s unused for %sh\n' "$t" "$(podman container inspect -f '{{.State.Status}}' "$t")" "$(( (now - last) / 3600 ))"
+done
+[ "$found" = 1 ] || echo "  (none)"
+echo
 echo "== volumes =="
 podman volume ls --format '{{.Name}}' | grep -E '^(ctr|gpu)-[a-z0-9][a-z0-9-]*-home$' || echo "(none)"
 echo

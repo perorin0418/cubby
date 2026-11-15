@@ -101,7 +101,9 @@ RUN printf '%s\n' 'export PATH="$HOME/go/bin:$HOME/.local/bin:$PATH"' \
 
 COPY ctr-sshd.conf /etc/ssh/sshd_config.d/ctr.conf
 COPY ctr-entrypoint.sh /usr/local/bin/ctr-entrypoint
-RUN chmod 755 /usr/local/bin/ctr-entrypoint
+# 作業ごとのコンテナ（作業用コンテナ）を使うコマンド
+COPY cubby-task /usr/local/bin/cubby-task
+RUN chmod 755 /usr/local/bin/ctr-entrypoint /usr/local/bin/cubby-task
 
 ENTRYPOINT ["/usr/local/bin/tini", "--", "/usr/local/bin/ctr-entrypoint"]
 CMD ["/usr/sbin/sshd", "-D", "-e"]

@@ -205,7 +205,13 @@ c1=$(created)
 r_busy=$(cssh "test -e /ctr-smoke-tmp && echo mounted || echo not-mounted" 2>/dev/null | tr -d '\r')
 c2=$(created)
 wait "$bg" 2>/dev/null
-sleep 2
+# 1 本目のセッションが確実に終わるまで待つ（Windows の Git Bash では wait が早く戻ることがある）
+i=0
+while [ "$i" -lt 30 ]; do
+  n=$(remote "podman exec $NAME sh -c 'ps -eo args= | grep -cE \"^sshd(-session)?: [^ ]+@\" || true'" 2>/dev/null | tr -d '\r')
+  [ "${n:-0}" = 0 ] && break
+  i=$((i + 1)); sleep 2
+done
 # 誰もつないでいない → 接続のときに作り直す
 r_idle=$(cssh "test -e /ctr-smoke-tmp && echo mounted || echo not-mounted" 2>/dev/null | tr -d '\r')
 c3=$(created)
@@ -219,6 +225,44 @@ if [ "$c3" != "$c2" ] && [ "$r_idle" = mounted ] && cssh "test -f ~/.ctr-smoke-m
   ok "R2 an outdated container is recreated on connect when nobody is connected (home kept)"
 else
   ng "R2 idle: created $c2 -> $c3, mount $r_idle"
+  remote "podman exec $NAME ps -eo pid,etimes,args=" 2>/dev/null | sed 's/^/      /'
+fi
+
+# K. 作業ごとのコンテナ（cubby-task）。ホストの Podman の API ソケットがあるときだけ
+if [ -z "$hsock" ]; then
+  sk "K1-K4 task containers need the host podman socket"
+else
+  # K1: 作業 a で実行でき、作業フォルダが作業用コンテナとホストで共有される
+  k1=$(cssh "cubby-task sh smoke-a 'echo from-task > out.txt; hostname'; cat \"\$(cubby-task path smoke-a)/out.txt\"" 2>/dev/null | tr -d '\r')
+  host_file=$(remote "cat '$WORK/tasks/smoke-a/out.txt'" 2>/dev/null | tr -d '\r')
+  if [ "$(printf '%s\n' "$k1" | head -n 1)" = smoke-a ] && [ "$(printf '%s\n' "$k1" | tail -n 1)" = from-task ] && [ "$host_file" = from-task ]; then
+    ok "K1 cubby-task runs commands in a task container; its folder is shared with the container and the host"
+  else
+    ng "K1 cubby-task: '$(printf '%s' "$k1" | tr '\n' '|')' host '$host_file'"
+  fi
+  # K2: 作業 a で入れたものや作ったものは、作業 b からは見えない
+  k2=$(cssh "cubby-task sh smoke-a 'touch /root/only-a'; cubby-task sh smoke-b 'test -e /root/only-a && echo leaked || echo isolated; ls ..' " 2>/dev/null | tr -d '\r')
+  case "$k2" in
+    isolated*) printf '%s\n' "$k2" | grep -qx 'smoke-a' && ng "K2 task b can see task a's folder: $k2" \
+                 || ok "K2 tasks are isolated from each other (environment and folders)" ;;
+    *) ng "K2 isolation: $k2" ;;
+  esac
+  # K3: 72 時間使っていないものだけ消える（印の時刻を古くして確かめる。作業フォルダは残る）
+  remote "touch -d '73 hours ago' '$WORK/tasks/.smoke-a.last-used'; .local/bin/ctr-task-gc >/dev/null 2>&1"
+  ka=$(remote "podman container exists $NAME--smoke-a && echo kept || echo removed")
+  kb=$(remote "podman container exists $NAME--smoke-b && echo kept || echo removed")
+  kf=$(remote "test -f '$WORK/tasks/smoke-a/out.txt' && echo folder-kept || echo folder-gone")
+  if [ "$ka" = removed ] && [ "$kb" = kept ] && [ "$kf" = folder-kept ]; then
+    ok "K3 ctr-task-gc removes task containers unused for 72h (folder kept) and keeps recent ones"
+  else
+    ng "K3 gc: smoke-a $ka, smoke-b $kb, $kf"
+  fi
+  # K4: CLAUDE.md に作業用コンテナの指示が書かれている
+  if cssh 'grep -q "cubby-task sh" ~/.claude/CLAUDE.md' >/dev/null 2>&1; then
+    ok "K4 ~/.claude/CLAUDE.md tells Claude to use task containers"
+  else
+    ng "K4 CLAUDE.md has no task container instructions"
+  fi
 fi
 
 # 12a. ctr-remove: 作業ディレクトリが空でなければ止まり、中の git の未コミットの変更を知らせる

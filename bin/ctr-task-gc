@@ -1,0 +1,46 @@
+#!/bin/sh
+# ctr-task-gc [--dry-run] : 最後に使ってから CTR_TASK_TTL_HOURS 時間（既定 72）たった作業用コンテナを消す。
+#
+# 作業用コンテナは、cubby のコンテナの中の cubby-task が作る（ラベル cubby.task=true）。
+# 「最後に使った時刻」は、cubby-task がコマンドを実行するたびに更新する印のファイル
+# （<作業ディレクトリ>/tasks/.<作業名>.last-used。ラベル cubby.task.stamp）の更新時刻。
+# 印がなければ作業用コンテナを作った時刻を使う。コマンドの実行中のもの（待機以外のプロセスが
+# あるもの）は消さない。作業フォルダは消さない。
+# systemd のユーザータイマー（cubby-task-gc.timer、1 時間ごと）から呼ばれる（setup-host.sh が設定する）。
+set -eu
+
+CONF=${CTR_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/cubby/config.env}
+if [ -r "$CONF" ]; then
+  # shellcheck disable=SC1090
+  . "$CONF"
+fi
+TTL=${CTR_TASK_TTL_HOURS:-72}
+LOG_DIR=${XDG_STATE_HOME:-$HOME/.local/state}/cubby
+mkdir -p "$LOG_DIR"
+dry=0
+[ "${1:-}" = --dry-run ] && dry=1
+log() { printf '%s ctr-task-gc: %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*" | tee -a "$LOG_DIR/task-gc.log" >&2; }
+
+now=$(date +%s)
+for c in $(podman ps -a --filter label=cubby.task=true --format '{{.Names}}'); do
+  stamp=$(podman container inspect -f '{{index .Config.Labels "cubby.task.stamp"}}' "$c" 2>/dev/null || true)
+  if [ -n "$stamp" ] && [ -e "$stamp" ]; then
+    last=$(stat -c %Y "$stamp")
+  else
+    last=$(podman container inspect -f '{{.Created.Unix}}' "$c" 2>/dev/null || echo "$now")
+  fi
+  idle_h=$(( (now - last) / 3600 ))
+  [ "$idle_h" -ge "$TTL" ] || continue
+  if [ "$(podman container inspect -f '{{.State.Running}}' "$c" 2>/dev/null)" = true ]; then
+    busy=$(podman exec "$c" ps -eo args= 2>/dev/null | grep -cvE '^(/usr/local/bin/tini|sleep infinity|ps )' || true)
+    if [ "${busy:-0}" -gt 0 ]; then
+      log "skip $c: unused for ${idle_h}h but $busy process(es) are running"
+      continue
+    fi
+  fi
+  if [ "$dry" = 1 ]; then
+    log "would remove $c (unused for ${idle_h}h >= ${TTL}h)"
+  else
+    podman rm -f "$c" >/dev/null && log "removed $c (unused for ${idle_h}h >= ${TTL}h; its folder is kept)"
+  fi
+done

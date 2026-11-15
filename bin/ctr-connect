@@ -154,6 +154,8 @@ EOF
     --userns=keep-id --user root --passwd=false \
     -e CTR_USER="$(id -un)" -e CTR_UID="$(id -u)" -e CTR_GID="$(id -g)" -e CTR_HOME="$HOME" \
     -e CTR_SUDO="${CTR_SUDO:-yes}" \
+    -e CTR_NAME="$name" -e CTR_WORK="$work" -e CTR_IMAGE="$IMAGE" \
+    -e CTR_TASK_TTL_HOURS="${CTR_TASK_TTL_HOURS:-72}" \
     --security-opt label=disable \
     --restart unless-stopped \
     -v "$name-home:$HOME" \

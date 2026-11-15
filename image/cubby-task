@@ -1,0 +1,98 @@
+#!/bin/sh
+# cubby-task : 作業ごとのコンテナ（作業用コンテナ）を使う。cubby のコンテナの中で使う。
+#
+#   cubby-task sh <作業名> '<コマンド>'   作業用コンテナの中でコマンドを実行する（bash -lc）
+#   cubby-task exec <作業名> -- <コマンド> [引数...]   同上（引数をそのまま渡す）
+#   cubby-task start <作業名>            作業用コンテナを用意して、作業フォルダのパスを表示する
+#   cubby-task path <作業名>             作業フォルダのパスを表示する
+#   cubby-task list                      作業用コンテナの一覧（最後に使った日時）
+#   cubby-task rm <作業名>               作業用コンテナを消す（作業フォルダは残す）
+#
+# 作業名は英小文字・数字・ハイフン（40 文字以内。例 shomu-a）。
+# 作業用コンテナは、ホストの Podman の上に、このコンテナと同じイメージで作る兄弟のコンテナ。
+# 作業フォルダ <作業ディレクトリ>/tasks/<作業名> だけを同じパスでマウントする（ほかの作業とは分かれる）。
+# 作業用コンテナの中では root で動く（rootless なので、ホストではログインユーザーの権限。
+# 作ったファイルはホストでもこのコンテナでもログインユーザーの所有になる）。
+# 最後に使ってから CTR_TASK_TTL_HOURS 時間（既定 72）たつと、ホストが自動で消す（作業フォルダは残る）。
+set -eu
+
+# コンテナの起動時に ctr-entrypoint が書いた値（SSH のセッションには環境変数として届かないため）
+if [ -z "${CTR_WORK:-}" ] && [ -r /etc/cubby/session.env ]; then
+  # shellcheck disable=SC1091
+  . /etc/cubby/session.env
+fi
+WORK=${CTR_WORK:-}
+OWNER=${CTR_NAME:-$(hostname)}
+IMAGE=${CTR_IMAGE:-localhost/ctr-dev:latest}
+TTL=${CTR_TASK_TTL_HOURS:-72}
+die() { printf 'cubby-task: %s\n' "$*" >&2; exit 1; }
+usage() { sed -n '2,10p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2; }
+
+[ -n "$WORK" ] || die "CTR_WORK is not set (run this inside a cubby container)"
+[ -S /var/run/docker.sock ] || die "the host podman socket is not available in this container (see ctr-list on the host: 'docker in containers')"
+ROOT="$WORK/tasks"
+
+valid() { case "$1" in ''|-*|*[!a-z0-9-]*) return 1 ;; esac; [ "${#1}" -le 40 ]; }
+need_task() {
+  valid "${1:-}" || die "invalid task name '${1:-}' (lowercase letters, digits and '-', up to 40 chars; e.g. shomu-a)"
+  t=$1; c="$OWNER--$t"; d="$ROOT/$t"; s="$ROOT/.$t.last-used"
+}
+
+# 作業用コンテナを用意する（なければ作る・止まっていれば起動する）。最後に使った時刻を記録する。
+ensure() {
+  mkdir -p "$d"
+  touch "$s"
+  state=$(docker inspect -f '{{.State.Running}}' "$c" 2>/dev/null || echo none)
+  case "$state" in
+    true) ;;
+    false) docker start "$c" >/dev/null ;;
+    *)
+      docker run -d --name "$c" --hostname "$t" \
+        --label cubby.task=true --label cubby.task.owner="$OWNER" --label cubby.task.name="$t" \
+        --label cubby.task.stamp="$s" \
+        -v "$d:$d" -w "$d" \
+        --entrypoint /usr/local/bin/tini "$IMAGE" -- sleep infinity >/dev/null
+      printf 'cubby-task: created task container %s (folder %s; removed automatically after %sh unused)\n' "$c" "$d" "$TTL" >&2 ;;
+  esac
+}
+
+ttyflag=
+[ -t 0 ] && [ -t 1 ] && ttyflag=-t
+
+cmd=${1:-}; [ $# -gt 0 ] && shift
+case "$cmd" in
+  sh)
+    need_task "${1:-}"; shift
+    [ $# -gt 0 ] || die "usage: cubby-task sh <task> '<command>'"
+    ensure
+    # shellcheck disable=SC2086
+    exec docker exec -i $ttyflag -w "$d" "$c" bash -lc "$*" ;;
+  exec)
+    need_task "${1:-}"; shift
+    [ "${1:-}" != -- ] || shift
+    [ $# -gt 0 ] || die "usage: cubby-task exec <task> -- <command> [args...]"
+    ensure
+    # shellcheck disable=SC2086
+    exec docker exec -i $ttyflag -w "$d" "$c" "$@" ;;
+  start)
+    need_task "${1:-}"; ensure; printf '%s\n' "$d" ;;
+  path)
+    need_task "${1:-}"; printf '%s\n' "$d" ;;
+  rm)
+    need_task "${1:-}"
+    docker rm -f "$c" >/dev/null 2>&1 && printf 'cubby-task: removed %s (folder %s is kept)\n' "$c" "$d" >&2 \
+      || die "no task container $c"
+    rm -f "$s" ;;
+  list)
+    found=0
+    for n in $(docker ps -a --filter "label=cubby.task.owner=$OWNER" --format '{{.Names}}'); do
+      found=1
+      tn=${n#"$OWNER--"}
+      st=$(docker inspect -f '{{.State.Status}}' "$n" 2>/dev/null || echo '?')
+      lu=$(date -r "$ROOT/.$tn.last-used" '+%Y-%m-%d %H:%M' 2>/dev/null || echo '?')
+      printf '%-24s %-8s last used %s  folder %s\n' "$tn" "$st" "$lu" "$ROOT/$tn"
+    done
+    [ "$found" = 1 ] || echo "(no task containers; they are removed after ${TTL}h unused)"
+    ;;
+  *) usage ;;
+esac
