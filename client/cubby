@@ -143,7 +143,36 @@ find_pubkeys() {
   if "$SSH_ADD_BIN" -L 2>/dev/null | grep -q '^ssh-\|^ecdsa-\|^sk-'; then
     "$SSH_ADD_BIN" -L | tr -d '\r'; return
   fi
-  die "no public key found; pass --key FILE"
+  # 既定の名前の鍵がない: ~/.ssh にある鍵の候補と、指定のしかたを案内する
+  log "ERROR: no SSH key found (looked for ~/.ssh/id_ed25519.pub, id_ecdsa.pub, id_rsa.pub and keys in ssh-agent)"
+  found=0
+  for p in "$default_ssh_dir"/*.pub; do
+    [ -r "$p" ] && [ -r "${p%.pub}" ] || continue
+    [ "$found" = 1 ] || log "keys found in $(natpath "$default_ssh_dir"); use one with --identity:"
+    found=1
+    log "  --identity $(natpath "${p%.pub}")"
+  done
+  [ "$found" = 1 ] || log "create one with: ssh-keygen -t ed25519   (then rerun add-host)"
+  exit 1
+}
+
+# パスの指定を整える: 先頭の ~ を展開し、Windows では C:\... や C:/... を Git Bash の形にする
+normpath() {
+  case "$1" in
+    '') return ;;
+    '~'|'~/'*|'~\'*) set -- "$(dirname "$default_ssh_dir")${1#\~}" ;;
+  esac
+  if [ "$CUBBY_OS" = windows ]; then cygpath -u "$1"; else printf '%s\n' "$1"; fi
+}
+
+# 綴りの近い既知のオプションを探す（先頭 5 文字か末尾 5 文字が同じもの）
+suggest_option() {
+  for o in --hostname --user --port --cloudflared --identity --ssh-host --key --work-root \
+           --mount --unmount --no-gpu --rebuild --replace-hostkey; do
+    a=$(printf '%s' "$1" | cut -c1-5); b=$(printf '%s' "$o" | cut -c1-5)
+    c=${1#"${1%?????}"}; d=${o#"${o%?????}"}
+    if [ "$a" = "$b" ] || [ "$c" = "$d" ]; then printf '%s\n' "$o"; return; fi
+  done
 }
 
 # ホストに鍵認証で入れることを確かめる。入れなければ、ログインのパスワードを 1 回だけ尋ねて
@@ -220,9 +249,20 @@ cmd_add_host() {
       --no-gpu)          gpu_mode=off; shift ;;
       --mount)           no_quote mount "$2"; mount_args="$mount_args --mount $2"; shift 2 ;;
       --unmount)         no_quote unmount "$2"; mount_args="$mount_args --unmount $2"; shift 2 ;;
-      *) die "unknown option: $1" ;;
+      *) s=$(suggest_option "$1")
+         die "unknown option: $1${s:+ (did you mean $s ?)}" ;;
     esac
   done
+  identity=$(normpath "$identity")
+  key=$(normpath "$key")
+  if [ -n "$identity" ]; then
+    [ -r "$identity" ] || die "cannot read --identity $identity"
+    # --key がなければ、--identity の公開鍵をコンテナにも登録する
+    if [ -z "$key" ]; then
+      [ -r "$identity.pub" ] || die "$identity.pub not found (needed to register the key); create it with: ssh-keygen -y -f $identity > $identity.pub"
+      key="$identity.pub"
+    fi
+  fi
   for v in "alias:$alias_name" "hostname:$hostname" "user:$user" "port:$port" \
            "work-root:$wt"; do
     no_quote "${v%%:*}" "${v#*:}"
