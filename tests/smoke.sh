@@ -101,6 +101,15 @@ else
   ng "4b container user: host '$hid' / container '$(printf '%s' "$cid" | tr '\n' ' ')'"
 fi
 
+# 4c. sudo（ホストの CTR_SUDO=no なら使えないこと、それ以外なら使えること）
+hsudo=$(remote '. "${XDG_CONFIG_HOME:-$HOME/.config}/cubby/config.env" 2>/dev/null; echo "${CTR_SUDO:-yes}"' | tr -d '\r')
+sid=$(cssh 'sudo -n id -u 2>/dev/null' 2>/dev/null | tr -d '\r')
+if [ "$hsudo" = no ]; then
+  [ -z "$sid" ] && ok "4c sudo is disabled (CTR_SUDO=no)" || ng "4c sudo works although CTR_SUDO=no"
+else
+  [ "$sid" = 0 ] && ok "4c sudo works without a password (sudo id -u -> 0)" || ng "4c sudo: '$sid'"
+fi
+
 # 5. 作業ディレクトリ: 空で始まり、ホストと同じパスで見え、書いたものがホストから見える
 if [ "$(cssh "ls -A '$WORK' | wc -l" 2>/dev/null | tr -d ' \r')" = 0 ] \
    && cssh "echo hi > '$WORK/ctr-smoke-file'" >/dev/null 2>&1 \

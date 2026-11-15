@@ -1,14 +1,14 @@
 FROM docker.io/library/debian:bookworm-slim
 
 # イメージの版。setup-host.sh はこの値が期待と違うイメージを作り直す（作りが変わったときに上げる）。
-LABEL cubby.image-version="3"
+LABEL cubby.image-version="4"
 
 # 利用者のユーザーはイメージに作らない。コンテナの起動時に ctr-entrypoint が
-# ホストのログインユーザー（同じ名前・UID・GID・ホームのパス）を登録する。
+# ホストのログインユーザー（同じ名前・UID・GID・ホームのパス）を登録し、sudo を許可する。
 # ホスト鍵はイメージに含めない（ホストから読み取り専用でマウントする）。
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
-      openssh-server netcat-openbsd git ca-certificates curl bash tini \
+      openssh-server netcat-openbsd git ca-certificates curl bash tini sudo \
  && rm -rf /var/lib/apt/lists/* \
  && rm -f /etc/ssh/ssh_host_* \
  && mkdir -p /run/sshd

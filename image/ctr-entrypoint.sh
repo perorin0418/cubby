@@ -8,6 +8,7 @@
 #
 #   CTR_USER  ホストのユーザー名      CTR_UID  ホストの UID
 #   CTR_GID   ホストの GID            CTR_HOME ホストのホームのパス（コンテナのホームもここ）
+#   CTR_SUDO  no 以外なら、そのユーザーにパスワードなしの sudo を許可する（既定 yes）
 #
 # 環境変数がなければ（動作確認用の podman run など）何もせずにコマンドを実行する。
 # 登録に失敗しても sshd は起動する（コンテナを止めず、ログで原因を追えるようにする）。
@@ -29,6 +30,15 @@ if [ -n "${CTR_USER:-}" ] && [ -n "${CTR_UID:-}" ] && [ -n "${CTR_GID:-}" ] && [
     usermod -l "$u" -g "$gid" -d "$home" -s /bin/bash "$other"
   else
     useradd -M -N -u "$uid" -g "$gid" -d "$home" -s /bin/bash "$u"
+  fi
+
+  # sudo（CTR_SUDO=no でなければ、パスワードなしで許可する。ユーザーにパスワードはないため）。
+  # コンテナ内の root は rootless Podman のユーザー名前空間の中の root で、ホストの root ではない。
+  if [ "${CTR_SUDO:-yes}" != no ] && [ -d /etc/sudoers.d ]; then
+    printf '%s ALL=(ALL) NOPASSWD:ALL\n' "$u" > /etc/sudoers.d/cubby
+    chmod 440 /etc/sudoers.d/cubby
+  else
+    rm -f /etc/sudoers.d/cubby
   fi
 
   # ホーム（コンテナごとのボリューム）。初回は空なので、所有者を合わせて /etc/skel を入れる。

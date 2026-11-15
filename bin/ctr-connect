@@ -117,6 +117,7 @@ EOF
     --uts=private --network=private \
     --userns=keep-id --user root --passwd=false \
     -e CTR_USER="$(id -un)" -e CTR_UID="$(id -u)" -e CTR_GID="$(id -g)" -e CTR_HOME="$HOME" \
+    -e CTR_SUDO="${CTR_SUDO:-yes}" \
     --security-opt label=disable \
     --restart unless-stopped \
     -v "$name-home:$HOME" \

@@ -57,8 +57,8 @@ bin/ctr-common.sh       ホスト側のスクリプトが共有する部分（�
 host/bootstrap-root.sh  root が要るホストの準備（cubby add-host が必要なときだけ sudo で実行する）
 host/setup-host.sh      ホストの準備（cubby add-host が自動で実行する）
 host/preflight.sh       ホストの事前確認（変更しない）
-image/                  コンテナイメージ（sshd, nc, git, curl, tini。利用者のユーザーは含めない）
-image/ctr-entrypoint.sh 起動時にホストのユーザーをコンテナの /etc/passwd に登録する
+image/                  コンテナイメージ（sshd, nc, git, curl, tini, sudo。利用者のユーザーは含めない）
+image/ctr-entrypoint.sh 起動時にホストのユーザーをコンテナの /etc/passwd に登録し、sudo を許可する
 config.env.example      ホスト側の設定の見本
 tests/smoke.sh          CLI で確かめられる受け入れテスト（手元から実行）
 ```
@@ -155,6 +155,19 @@ cubby はリポジトリを管理しません。各コンテナには空の作�
 - コンテナを作り直しても（`ctr-recreate`、`podman rm`）、作業ディレクトリとホームは残ります。
 - **GitHub などの認証はコンテナ内で用意してください**。ホーム（ボリューム）に置いたものはコンテナを作り直しても残るので、一度設定すればそのコンテナでは使い続けられます（例: コンテナ内で `gh auth login`（gh は別途インストール）、デプロイキーや個人用の鍵を `~/.ssh` に置く、`git config --global user.name/user.email`）。
 - 手元の ssh-agent はコンテナに転送しません（Desktop がエージェント転送を使うかは未確認のため）。
+
+## コンテナ内の sudo
+
+コンテナ内では、ホストと同じユーザーのまま **パスワードなしで sudo** が使えます（`apt-get install` など。Claude Code にパッケージを入れさせることもできます）。
+
+```sh
+sudo apt-get update && sudo apt-get install -y jq
+```
+
+- コンテナ内の root は rootless Podman のユーザー名前空間の中の root で、**ホストの root ではありません**。ホストに対しては、ログインユーザーができること以上はできません。
+- `apt` などで入れたものはコンテナに残りますが、**コンテナを作り直すと消えます**（`ctr-recreate`、`podman rm`）。常に必要なものは `image/Dockerfile` に追記して `cubby add-host <id> --rebuild` でイメージを作り直してください。
+- sudo（root）で作業ディレクトリに作ったファイルは、ホストではログインユーザーではなく別の UID（例 100000）の所有に見え、ホストのログインユーザーからは直接変更できません。作業ディレクトリでは sudo を使わずに作業するのが無難です（`ctr-remove --force` は `podman unshare` で消すので、片付けはできます）。
+- 不要なホストでは、ホストの `~/.config/cubby/config.env` に `CTR_SUDO=no` と書き、既存のコンテナを `ctr-recreate` で作り直すと無効になります。
 
 ## GPU を使う
 
@@ -259,6 +272,7 @@ Desktop での確認（セッションがコンテナ内で動く・再起動後
 | `gpu=no` なのに GPU がある | ドライバの更新後なら `cubby add-host` の再実行で CDI の定義を作り直す。`add-host` の出力の `WARNING`（toolkit の導入や `nvidia-ctk cdi generate` の失敗） |
 | コンテナにマウントが見えない | `ctr-list` の extra mounts（ホストにないパスは飛ばされる）。設定を変えた後なら `ctr-recreate <名前>` |
 | `mount settings changed since ...` | マウントの設定が変わった。反映するならホストで `ctr-recreate <名前>` |
+| `sudo: a password is required` | ホストの `config.env` が `CTR_SUDO=no` になっていないか。旧版のイメージで作ったコンテナなら `cubby add-host <id>` の後に `ctr-recreate <名前>` |
 | `work directory ... is not empty` | `ctr-remove` の安全装置。中身（とリポジトリの未コミット・未 push）を確かめてから、移すか `--force` |
 | コンテナ内の git で認証エラー | コンテナ内で GitHub などの認証を用意する（「作業ディレクトリとリポジトリ」を参照） |
 | `ssh ctr-x.<id>` が `kex_exchange_identification` などで即切れる | `ssh <host> '.local/bin/ctr-connect ctr-x.<id> </dev/null \| head -c 8'` が `SSH-2.0-` を返すか。標準エラー出力の `ctr-connect:` のメッセージ |
@@ -298,5 +312,6 @@ Desktop での確認（セッションがコンテナ内で動く・再起動後
 | マウントは repo の `.git`・worktree・ホーム・鍵のみ | ホストごとの `~/.config/cubby/mounts` で任意のディレクトリを全コンテナにマウント。`cubby add-host --mount/--unmount`、反映は `ctr-recreate` | 利用者の要望 |
 | — | `~/.ssh/config` の書き換えを mkdir のロックで排他し、別のファイルに書いてから置き換える | 複数の `add-host` を同時に動かすと、互いのブロックを上書きしたり、書き換え中のファイルを ssh が読んで失敗したりしたため（検証で判明） |
 | コンテナ内に `dev` ユーザーを作り（UID/GID をホストに合わせてイメージをビルド）、`dev` でログイン | ユーザーは作らない。起動時にホストのログインユーザー（同じ名前・UID・GID・ホームのパス）をコンテナの `/etc/passwd` に登録し、その名前でログインする。イメージはホストに依存しない（版のラベルで古いイメージを自動で作り直す） | 権限の食い違いを避けるため（利用者の要望） |
+| コンテナ内で sudo は使えない | ホストのユーザーにパスワードなしの sudo を許可（`CTR_SUDO=no` で無効） | 利用者の要望。コンテナ内の root はホストの root ではないため |
 | `docker run --init` | イメージに tini を入れて PID 1 にする | ホストの catatonit の有無に依存しないため |
 | 手元は macOS・Linux の OpenSSH 前提、`~/.ssh/config` に手で追記 | Windows・macOS・Linux に対応。`~/.ssh/config` の先頭に管理ブロックを書く（`Include` は使わない）。ProxyCommand は絶対パス。Windows は Windows 標準の OpenSSH を使う | 利用者の要望。GUI から起動した Desktop の PATH が最小限のため |
