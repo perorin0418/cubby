@@ -1,16 +1,17 @@
 #!/bin/sh
-# host/setup-host.sh [--id ID] [--repo PATH] [--repo-url URL] [--worktrees PATH] [--pubkeys FILE|-] [--rebuild]
+# host/setup-host.sh [--id ID] [--work-root PATH] [--pubkeys FILE|-] [--rebuild] [--gpu auto|off]
+#                    [--mount SPEC]... [--unmount PATH]...
 #
 # リモートホストの準備。ログインユーザーで実行する（sudo 不要・rootless Podman）。
 # 通常は手元の `client/cubby add-host` から自動で呼ばれる。何度実行しても同じ結果になる。
-# root が要る準備（パッケージ・subuid・linger・ディレクトリ）は host/bootstrap-root.sh が先に済ませる。
+# root が要る準備（パッケージ・subuid・linger・必要ならディレクトリ）は host/bootstrap-root.sh が先に済ませる。
 #
-#   元リポジトリ                         なければ --repo-url から clone する
 #   ~/.config/cubby/config.env          なければ作る（既存の値は変えない）
 #   ~/.config/cubby/hostkeys/           全コンテナ共通のホスト鍵。なければ作る（上書きしない）
 #   ~/.config/cubby/authorized_keys/dev 渡された公開鍵のうち未登録の行だけ追記する
-#   worktree の置き場                    なければ作る
+#   作業ディレクトリの置き場             なければ作る（既定 ~/cubby/work）
 #   ~/.local/bin/ctr-*                  スクリプトを設置する
+#   ~/.config/cubby/mounts              --mount / --unmount を反映する
 #   イメージ                             なければビルドする（--rebuild で作り直す）
 #   動作確認                             rootless でコンテナが起動できるか確かめる
 #   GPU                                 GPU 付きのコンテナが起動できるか確かめ、結果を
@@ -26,7 +27,7 @@ log()  { printf 'setup-host: %s\n' "$*" >&2; }
 warn() { printf 'setup-host: WARNING: %s\n' "$*" >&2; }
 die()  { printf 'setup-host: ERROR: %s\n' "$*" >&2; exit 1; }
 
-id_arg= repo_arg= repo_url= wt_arg= pubkeys= rebuild=0 gpu_mode=auto
+id_arg= work_arg= pubkeys= rebuild=0 gpu_mode=auto
 add_mounts= del_mounts=
 nl='
 '
@@ -36,16 +37,14 @@ while [ $# -gt 0 ]; do
     --mount)     add_mounts="$add_mounts$2$nl"; shift 2 ;;
     --unmount)   del_mounts="$del_mounts$2$nl"; shift 2 ;;
     --id)        id_arg=$2; shift 2 ;;
-    --repo)      repo_arg=$2; shift 2 ;;
-    --repo-url)  repo_url=$2; shift 2 ;;
-    --worktrees) wt_arg=$2; shift 2 ;;
+    --work-root) work_arg=$2; shift 2 ;;
     --pubkeys)   pubkeys=$2; shift 2 ;;
     --rebuild)   rebuild=1; shift ;;
     *) die "unknown option: $1" ;;
   esac
 done
 
-for c in podman git flock ssh-keygen; do
+for c in podman flock ssh-keygen; do
   command -v "$c" >/dev/null 2>&1 || die "$c is not installed"
 done
 
@@ -57,42 +56,20 @@ chmod 700 "$CONF_DIR"
 # 設定ファイル（既存の値は変えない。食い違いは警告する）
 if [ ! -e "$CONF" ]; then
   sed -e "s|^CTR_HOST_ID=.*|CTR_HOST_ID=${id_arg}|" \
-      -e "s|^CTR_REPO=.*|CTR_REPO=${repo_arg:-/srv/project}|" \
-      -e "s|^CTR_WT_ROOT=.*|CTR_WT_ROOT=${wt_arg:-/srv/worktrees}|" \
+      -e "s|^CTR_WORK_ROOT=.*|CTR_WORK_ROOT=${work_arg:-$HOME/cubby/work}|" \
       "$here/config.env.example" > "$CONF"
   log "created $CONF"
 fi
 # shellcheck disable=SC1090
 . "$CONF"
-REPO=${CTR_REPO:-/srv/project}
-WT_ROOT=${CTR_WT_ROOT:-/srv/worktrees}
+WORK_ROOT=${CTR_WORK_ROOT:-$HOME/cubby/work}
 IMAGE=${CTR_IMAGE:-localhost/ctr-dev:latest}
 HOSTKEYS=${CTR_HOSTKEYS:-$CONF_DIR/hostkeys}
 AUTHKEYS=${CTR_AUTHKEYS:-$CONF_DIR/authorized_keys}
 BIN_DIR=${CTR_BIN_DIR:-$HOME/.local/bin}
 keep() { [ -z "$2" ] || [ "$2" = "$3" ] || warn "$CONF keeps $1=$3 (requested $2); edit it by hand to change"; }
 keep CTR_HOST_ID "$id_arg" "${CTR_HOST_ID:-}"
-keep CTR_REPO "$repo_arg" "$REPO"
-keep CTR_WT_ROOT "$wt_arg" "$WT_ROOT"
-
-# 元リポジトリ（なければ clone する。ssh の URL は手元から転送された ssh-agent で認証する）
-# CTR_REPO=none はリポジトリのないホスト（すべての作業が git なし）
-if [ "$REPO" = none ]; then
-  log "no repository on this host (CTR_REPO=none); all work directories are plain directories"
-else
-  if [ ! -d "$REPO/.git" ]; then
-    [ -n "$repo_url" ] || die "$REPO/.git not found; pass --repo-url to clone it, --repo to use another path, or --no-repo for work without git"
-    if [ -d "$REPO" ] && [ -n "$(ls -A "$REPO" 2>/dev/null)" ]; then
-      die "$REPO exists and is not empty, but is not a git repository"
-    fi
-    log "cloning $repo_url into $REPO"
-    GIT_SSH_COMMAND='ssh -o StrictHostKeyChecking=accept-new' \
-      git clone -q "$repo_url" "$REPO" </dev/null >&2 || die "git clone failed"
-  fi
-  [ -w "$REPO/.git" ] || die "$REPO/.git is not writable by $(id -un)"
-  [ "$(stat -c %u "$REPO/.git")" = "$(id -u)" ] \
-    || warn "$REPO/.git is not owned by $(id -un); the container user dev (uid $(id -u)) may fail to write"
-fi
+keep CTR_WORK_ROOT "$work_arg" "$WORK_ROOT"
 
 # ホスト鍵（rootless なのでログインユーザー所有。既にあれば作り直さない）
 mkdir -p "$HOSTKEYS" "$AUTHKEYS"
@@ -129,13 +106,13 @@ if [ -n "$pubkeys" ]; then
 fi
 [ -s "$ak" ] || warn "$ak is empty; nobody can log in to the containers yet"
 
-# worktree の置き場
-if [ ! -d "$WT_ROOT" ]; then
-  mkdir -p "$WT_ROOT" 2>/dev/null \
-    || die "cannot create $WT_ROOT; ask an admin: sudo install -d -o $(id -un) $WT_ROOT"
-  log "created $WT_ROOT"
+# 作業ディレクトリの置き場（各コンテナの作業ディレクトリ <置き場>/<名前> はここに作られる）
+if [ ! -d "$WORK_ROOT" ]; then
+  mkdir -p "$WORK_ROOT" 2>/dev/null \
+    || die "cannot create $WORK_ROOT; ask an admin: sudo install -d -o $(id -un) $WORK_ROOT"
+  log "created $WORK_ROOT"
 fi
-[ -w "$WT_ROOT" ] || die "$WT_ROOT is not writable by $(id -un)"
+[ -w "$WORK_ROOT" ] || die "$WORK_ROOT is not writable by $(id -un)"
 
 # スクリプト
 mkdir -p "$BIN_DIR"

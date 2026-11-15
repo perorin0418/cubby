@@ -1,5 +1,5 @@
 #!/bin/sh
-# host/bootstrap-root.sh --user USER --repo PATH --worktrees PATH [--check]
+# host/bootstrap-root.sh --user USER --work-root PATH [--gpu auto|off] [--check]
 #
 # rootless Podman で cubby を動かすための、root 権限が要る準備をする。
 # 通常は手元の `client/cubby add-host` から自動で呼ばれる。何度実行しても同じ結果になる。
@@ -9,7 +9,7 @@
 #     - パッケージ: podman, git, flock, ssh-keygen, tar, newuidmap/newgidmap など
 #     - /etc/subuid・/etc/subgid に USER の範囲（65536 個）
 #     - USER の linger（SSH が切れてもコンテナと Claude Code 本体を動かし続ける）
-#     - 元リポジトリ・worktree の置き場のディレクトリ（なければ USER 所有で作る）
+#     - 作業ディレクトリの置き場（USER が作れない場所なら、USER 所有で作る）
 #     - GPU（--gpu auto のとき。既定）: NVIDIA のドライバが動いていれば、
 #       NVIDIA Container Toolkit を入れ、CDI の定義（/etc/cdi/nvidia.yaml）を作る。
 #       ドライバの版が変わって CDI の定義が古くなっていれば作り直す。
@@ -18,25 +18,25 @@
 # 既存のディレクトリの所有者や中身は変えない。
 set -eu
 
-user= repo= wt= check=0 gpu=auto
+user= wt= check=0 gpu=auto
 while [ $# -gt 0 ]; do
   case "$1" in
     --user)      user=$2; shift 2 ;;
-    --repo)      repo=$2; shift 2 ;;
-    --worktrees) wt=$2; shift 2 ;;
+    --work-root) wt=$2; shift 2 ;;
     --check)     check=1; shift ;;
     --gpu)       gpu=$2; shift 2 ;;
     *) echo "bootstrap: unknown option: $1" >&2; exit 1 ;;
   esac
 done
-[ -n "$user" ] && [ -n "$repo" ] && [ -n "$wt" ] || {
-  echo "usage: $0 --user USER --repo PATH --worktrees PATH [--check]" >&2; exit 1; }
+[ -n "$user" ] && [ -n "$wt" ] || {
+  echo "usage: $0 --user USER --work-root PATH [--gpu auto|off] [--check]" >&2; exit 1; }
 
 log()  { printf 'bootstrap: %s\n' "$*" >&2; }
 die()  { printf 'bootstrap: ERROR: %s\n' "$*" >&2; exit 1; }
 
 [ "$user" != root ] || die "log in as a normal user, not root (containers run rootless as that user)"
 
+# git は ctr-remove / ctr-list が作業ディレクトリ内のリポジトリの状態（未コミットの変更など）を調べるのに使う
 REQUIRED_CMDS="podman git flock ssh-keygen tar newuidmap newgidmap"
 
 missing_cmds() {
@@ -109,23 +109,25 @@ linger_needed() {
   [ "$(loginctl show-user "$user" -p Linger --value 2>/dev/null)" != yes ]
 }
 # ディレクトリを USER が使える状態か: 0 使える / 1 作る必要がある / 2 既存だが使えない
+# USER がそのパスに書けるか（--check のときは USER 本人として実行されている）
+user_can_write() {
+  if [ "$check" = 1 ]; then [ -w "$1" ]; return; fi
+  [ "$(stat -c %U "$1")" = "$user" ] && return 0
+  if command -v runuser >/dev/null 2>&1; then
+    runuser -u "$user" -- test -w "$1"
+  else
+    su "$user" -s /bin/sh -c "test -w '$1'"
+  fi
+}
+# 0: USER が使える（または USER 自身が作れる。例 ホームの下）/ 1: root が作る必要がある / 2: 既存だが使えない
 dir_state() {
   if [ -e "$1" ]; then
-    if [ "$check" = 1 ]; then [ -w "$1" ] && return 0; return 2; fi
-    su_test=$(stat -c %U "$1")
-    [ "$su_test" = "$user" ] && return 0
-    # 所有者が違っても USER が書ければよい
-    if command -v runuser >/dev/null 2>&1; then
-      runuser -u "$user" -- test -w "$1" && return 0
-    else
-      su "$user" -s /bin/sh -c "test -w '$1'" && return 0
-    fi
+    user_can_write "$1" && return 0
     return 2
   fi
-  if [ "$check" = 1 ]; then
-    p=$(dirname "$1"); while [ ! -e "$p" ]; do p=$(dirname "$p"); done
-    [ -w "$p" ] && return 0
-  fi
+  # まだない: いちばん近い既存の親に USER が書けるなら、USER 自身（setup-host.sh）が作る
+  p=$(dirname "$1"); while [ ! -e "$p" ]; do p=$(dirname "$p"); done
+  user_can_write "$p" && return 0
   return 1
 }
 
@@ -138,8 +140,7 @@ if [ "$check" = 1 ]; then
   has_subid /etc/subgid || need="$need subgid"
   if linger_needed; then need="$need linger"; fi
   g=$(gpu_needs); [ -z "$g" ] || need="$need gpu($g)"
-  for d in "$repo" "$wt"; do
-    [ "$d" != none ] || continue
+  for d in "$wt"; do
     set +e; dir_state "$d"; s=$?; set -e
     case $s in
       1) need="$need mkdir($d)" ;;
@@ -220,8 +221,7 @@ if linger_needed; then
 fi
 
 # ディレクトリ（なければ USER 所有で作る。既存のものは変えない）
-for d in "$repo" "$wt"; do
-  [ "$d" != none ] || continue
+for d in "$wt"; do
   set +e; dir_state "$d"; s=$?; set -e
   case $s in
     1) install -d -o "$user" -m 755 "$d"; log "created $d (owner $user)" ;;

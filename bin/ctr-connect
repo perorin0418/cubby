@@ -1,23 +1,22 @@
 #!/bin/sh
-# ctr-connect <ctr|gpu>-<work>[.nogit][.<host-id>]
+# ctr-connect <ctr|gpu>-<work>[.<host-id>]
 #
-# ~/.ssh/config の ProxyCommand から呼ばれる。接続名のコンテナと worktree を用意し
+# ~/.ssh/config の ProxyCommand から呼ばれる。接続名のコンテナと作業ディレクトリを用意し
 # （なければ作る・止まっていれば起動する）、コンテナ内の sshd と標準入出力をつなぐ。
 # rootless Podman で動かす（sudo 不要）。
 #
 # 接続名は ctr-<作業名>.<ホストID>（GPU なし）または gpu-<作業名>.<ホストID>（GPU あり）。
-# ドット以降はホストの選択に使うだけで、コンテナ名・ブランチ名・worktree 名には
+# ドット以降はホストの選択に使うだけで、コンテナ名・作業ディレクトリ名には
 # ctr-<作業名> / gpu-<作業名> を使う。config.env の CTR_HOST_ID が設定されていれば、
 # ホストID が一致しない接続は拒否する（接続先の取り違え防止）。
 # gpu- のコンテナには CTR_GPU_ARGS（既定: NVIDIA の CDI デバイス nvidia.com/gpu=all）を付ける。
 # setup-host.sh がこのホストで GPU を使えないと判定した場合（detected.env）は拒否する。
 #
-# git を使わない作業: 接続名に .nogit を入れる（例 ctr-notes.nogit.lab1）か、ホストの
-# CTR_REPO=none（cubby add-host --no-repo）のとき、作業ディレクトリは git worktree ではなく
-# ただのディレクトリになる（ブランチを作らず、.git もマウントしない）。
-# 作業ディレクトリの種類は最初に作ったときに決まる。既存のものと違う種類での接続は拒否する。
+# 作業ディレクトリは <CTR_WORK_ROOT>/<名前>（既定 ~/cubby/work/<名前>）。中身は空で始まり、
+# リポジトリの clone などはコンテナ内の Claude Code（や利用者）が行う。
+# ホストと同じパスでマウントするので、ホストからも同じパスで見える。
 #
-# 重要: 標準出力は SSH の通信路そのもの。ログ・git・podman の出力は必ず標準エラー出力へ出す。
+# 重要: 標準出力は SSH の通信路そのもの。ログ・podman の出力は必ず標準エラー出力へ出す。
 #       また、準備中のコマンドが SSH の入力を読み取らないよう、標準入力は /dev/null にする。
 set -eu
 
@@ -33,8 +32,7 @@ if [ -r "$CONF_DIR/detected.env" ]; then
   . "$CONF_DIR/detected.env"
   [ -r "$CONF" ] && . "$CONF"
 fi
-REPO=${CTR_REPO:-/srv/project}
-WT_ROOT=${CTR_WT_ROOT:-/srv/worktrees}
+WORK_ROOT=${CTR_WORK_ROOT:-$HOME/cubby/work}
 IMAGE=${CTR_IMAGE:-localhost/ctr-dev:latest}
 HOSTKEYS=${CTR_HOSTKEYS:-$CONF_DIR/hostkeys}
 AUTHKEYS=${CTR_AUTHKEYS:-$CONF_DIR/authorized_keys}
@@ -59,43 +57,24 @@ esac
 [ "${#name}" -le 44 ] || { log "name too long: $name"; exit 2; }
 gpu=no
 case "$name" in gpu-*) gpu=yes ;; esac
-# ドット以降: [オプション.]...<ホストID>。オプションは nogit だけ。
-nogit=no
 if [ "$name" != "$full" ]; then
-  rest=${full#*.}
-  case "$rest" in ''|.*|*.|*..*|*[!a-z0-9.-]*) log "invalid name: $full"; exit 2 ;; esac
-  hostpart=${rest##*.}
-  opts=
-  [ "$rest" = "$hostpart" ] || opts=${rest%.*}
-  # ホストID を省略した ctr-x.nogit
-  if [ -z "$opts" ] && [ "$hostpart" = nogit ]; then opts=nogit hostpart=${HOST_ID:-nogit}; fi
+  hostpart=${full#*.}
   case "$hostpart" in
     ''|*[!a-z0-9-]*) log "invalid host id: $full"; exit 2 ;;
   esac
-  if [ -n "$opts" ]; then
-    for o in $(printf '%s' "$opts" | tr '.' ' '); do
-      case "$o" in
-        nogit) nogit=yes ;;
-        *) log "unknown option '$o' in $full (only .nogit is supported)"; exit 2 ;;
-      esac
-    done
-    case "$opts" in *[!a-z.]*|.*|*.|*..*) log "invalid name: $full"; exit 2 ;; esac
-  fi
   if [ -n "$HOST_ID" ] && [ "$hostpart" != "$HOST_ID" ]; then
     log "host id mismatch: $hostpart (this host is $HOST_ID)"; exit 2
   fi
 fi
-# リポジトリのないホスト（CTR_REPO=none）では、すべて git なし
-[ "$REPO" != none ] || nogit=yes
 
 if [ "$gpu" = yes ] && [ "$GPU_AVAILABLE" != yes ]; then
   log "this host has no usable GPU (${HOST_ID:-$(hostname)}); connect as ctr-${name#gpu-} instead, or rerun cubby add-host after installing the GPU driver"
   exit 2
 fi
 
-wt="$WT_ROOT/$name"
+work="$WORK_ROOT/$name"
 
-# 同名の同時接続でコンテナや worktree が二重に作られないよう、名前ごとに排他する。
+# 同名の同時接続でコンテナが二重に作られないよう、名前ごとに排他する。
 # ロック中に起動するコマンドには必ず 9>&- を付ける。rootless Podman は conmon や
 # fuse-overlayfs などの常駐プロセスを起動し、それらがロックの fd を受け継いで
 # コンテナが動いている間ずっとロックを持ち続けてしまう。
@@ -103,34 +82,13 @@ mkdir -p "$LOCK_DIR"
 exec 9>"$LOCK_DIR/$name.lock"
 flock -w 60 9 || { log "lock timeout: $name"; exit 1; }
 
-if [ -d "$wt" ]; then
-  # 既存の作業ディレクトリの種類（worktree には .git ファイルがある）と、要求が違えば断る
-  if [ -e "$wt/.git" ] && [ "$nogit" = yes ]; then
-    if [ "$REPO" = none ]; then
-      log "$wt is a git worktree, but this host is configured without a repository"
-    else
-      log "$name already exists as a git worktree; connect without .nogit (or use another name)"
-    fi
-    exit 2
-  elif [ ! -e "$wt/.git" ] && [ "$nogit" = no ]; then
-    log "$name already exists as a plain directory (no git); connect as $name.nogit.${HOST_ID:-<host-id>} (or use another name)"
-    exit 2
-  fi
-elif [ "$nogit" = yes ]; then
-  log "creating work directory $wt (no git)"
-  mkdir -p "$wt"
-else
-  if git -C "$REPO" show-ref --verify --quiet "refs/heads/$name" </dev/null 9>&-; then
-    log "creating worktree $wt (existing branch $name)"
-    git -C "$REPO" worktree add "$wt" "$name" </dev/null 1>&2 9>&-
-  else
-    log "creating worktree $wt (new branch $name)"
-    git -C "$REPO" worktree add -b "$name" "$wt" </dev/null 1>&2 9>&-
-  fi
+if [ ! -d "$work" ]; then
+  log "creating work directory $work"
+  mkdir -p "$work"
 fi
 
 # --userns=keep-id : ホストのログインユーザーをコンテナ内の同じ UID（= dev）に対応づける。
-#                    worktree や .git の所有者がホストと一致し、書き込みや git の所有者チェックが通る。
+#                    作業ディレクトリの所有者がホストと一致し、書き込みや git の所有者チェックが通る。
 # --user root      : keep-id は既定の実行ユーザーをログインユーザーにするので、sshd 用に root に戻す
 #                    （root といっても rootless のユーザー名前空間の中の root）。
 # label=disable    : SELinux のホストで、マウント元を再ラベルせずに読み書きできるようにする。
@@ -139,12 +97,10 @@ fi
 # 追加マウント（~/.config/cubby/mounts）。ホストにないパスは警告して飛ばす。
 mount_sig=$(ctr_mount_sig)
 if ! podman container exists "$name" </dev/null 9>&-; then
-  log "creating container $name (gpu: $gpu, git: $([ "$nogit" = yes ] && echo no || echo yes))"
+  log "creating container $name (gpu: $gpu)"
   set --
   # shellcheck disable=SC2086
   [ "$gpu" = yes ] && set -- $GPU_ARGS
-  # git の作業なら元リポジトリの .git だけをマウントする（worktree の .git ファイルがここを指す）
-  [ "$nogit" = yes ] || set -- "$@" -v "$REPO/.git:$REPO/.git"
   while IFS= read -r spec; do
     [ -n "$spec" ] || continue
     set -- "$@" -v "$spec"
@@ -160,11 +116,11 @@ EOF
     --security-opt label=disable \
     --restart unless-stopped \
     -v "$name-home:/home/dev" \
-    -v "$wt:$wt" \
+    -v "$work:$work" \
     -v "$HOSTKEYS:/etc/ssh/ctr-hostkeys:ro" \
     -v "$AUTHKEYS:/etc/ssh/ctr-authorized_keys:ro" \
     "$@" \
-    -w "$wt" \
+    -w "$work" \
     "$IMAGE" </dev/null >/dev/null 9>&-
 else
   # マウントの設定がコンテナを作ったときと変わっていれば知らせる（作り直しはしない。セッションが切れるため）

@@ -1,13 +1,13 @@
 #!/bin/sh
-# ctr-remove [-y] [--force] <ctr|gpu>-<work>[.nogit][.<host-id>]
+# ctr-remove [-y] [--force] <ctr|gpu>-<work>[.<host-id>]
 #
-# 接続名 <name> のコンテナ・作業ディレクトリ・ホームのボリュームを片付ける。ブランチは消さない。
+# 接続名 <name> のコンテナ・作業ディレクトリ・ホームのボリュームを片付ける。
 #   -y       確認を省略する
-#   --force  git の作業: 未コミットの変更があっても worktree を消す（git worktree remove --force）
-#            git なしの作業: 中身があっても作業ディレクトリを消す
+#   --force  作業ディレクトリに中身があっても消す
 #
-# 何も消す前に、git の作業なら未コミットの変更、git なしの作業なら作業ディレクトリの中身を調べ、
-# あれば止まって内容を表示する（git なしの作業には変更を検出する仕組みがないため、空でなければ止める）。
+# 作業ディレクトリが空でなければ、何も消す前に止まって中身を表示する。
+# 中に git のリポジトリ（コンテナ内で clone したものなど）があれば、未コミットの変更や
+# push していないコミットがあるかも表示する。
 set -eu
 
 CONF=${CTR_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/cubby/config.env}
@@ -15,8 +15,7 @@ if [ -r "$CONF" ]; then
   # shellcheck disable=SC1090
   . "$CONF"
 fi
-REPO=${CTR_REPO:-/srv/project}
-WT_ROOT=${CTR_WT_ROOT:-/srv/worktrees}
+WORK_ROOT=${CTR_WORK_ROOT:-$HOME/cubby/work}
 
 log() { printf 'ctr-remove: %s\n' "$*" >&2; }
 usage() { echo "usage: ctr-remove [-y] [--force] <name>" >&2; exit 2; }
@@ -32,7 +31,7 @@ for arg in "$@"; do
     *)        [ -z "$name" ] || usage; name=$arg ;;
   esac
 done
-# 接続名の .nogit や .<ホストID> は取り除く（ctr-notes.nogit.lab1 → ctr-notes）
+# 接続名の .<ホストID> は取り除く（ctr-feature1.lab1 → ctr-feature1）
 name=${name%%.*}
 
 case "$name" in
@@ -42,47 +41,45 @@ case "$name" in
 esac
 [ "${#name}" -le 44 ] || { log "name too long: $name"; exit 2; }
 
-wt="$WT_ROOT/$name"
+work="$WORK_ROOT/$name"
 vol="$name-home"
 
 has_container=0; podman container exists "$name" >/dev/null 2>&1 && has_container=1
 has_volume=0;    podman volume exists "$vol" >/dev/null 2>&1 && has_volume=1
-has_wt=0;        [ -e "$wt" ] && has_wt=1
-# worktree には .git ファイルがある。なければ git なしの作業ディレクトリ
-plain=0;         [ "$has_wt" = 1 ] && [ ! -e "$wt/.git" ] && plain=1
+has_work=0;      [ -e "$work" ] && has_work=1
 
-if [ "$has_container$has_volume$has_wt" = 000 ]; then
+if [ "$has_container$has_volume$has_work" = 000 ]; then
   log "nothing to remove for $name"
   exit 0
 fi
 
+# 作業ディレクトリの中の git のリポジトリ（深さ 3 まで）の状態を表示する
+git_report() {
+  find "$1" -maxdepth 3 -name .git 2>/dev/null | while IFS= read -r g; do
+    r=$(dirname "$g")
+    st=$(git -C "$r" status --porcelain 2>/dev/null | wc -l | tr -d ' ')
+    ahead=$(git -C "$r" rev-list --count '@{upstream}..HEAD' 2>/dev/null || echo '?')
+    printf '  git %s: %s uncommitted change(s), %s unpushed commit(s)\n' "$r" "$st" "$ahead"
+  done
+}
+
 # 1. 対象を表示し、確認を求める
 echo "remove targets for $name:"
 [ "$has_container" = 1 ] && echo "  container: $name"
-if [ "$has_wt" = 1 ]; then
-  if [ "$plain" = 1 ]; then echo "  work dir:  $wt (no git)"; else echo "  worktree:  $wt"; fi
-fi
-[ "$has_volume" = 1 ]    && echo "  volume:    $vol"
-[ "$plain" = 1 ] || echo "  (branch $name is kept)"
+[ "$has_work" = 1 ]      && echo "  work dir:  $work"
+[ "$has_volume" = 1 ]    && echo "  volume:    $vol (home: Claude Code sessions, settings)"
 
-# 何も消す前に止める条件（--force 指定時を除く）
-if [ "$has_wt" = 1 ] && [ "$force" = 0 ]; then
-  if [ "$plain" = 1 ]; then
-    if [ -n "$(ls -A "$wt" 2>/dev/null)" ]; then
-      log "work directory $wt is not empty (no git, so changes cannot be checked); nothing was removed."
-      log "move what you need, then rerun; or use --force to delete it. contents:"
-      ls -A "$wt" | head -n 20 >&2
-      exit 1
-    fi
-  else
-    dirty=$(git -C "$wt" status --porcelain 2>&1) || {
-      log "cannot read git status of $wt:"; printf '%s\n' "$dirty" >&2; exit 1; }
-    if [ -n "$dirty" ]; then
-      log "worktree has uncommitted changes; nothing was removed (use --force to discard):"
-      printf '%s\n' "$dirty" >&2
-      exit 1
-    fi
+# 作業ディレクトリが空でなければ、何も消す前に止める（--force 指定時を除く）
+if [ "$has_work" = 1 ] && [ -n "$(ls -A "$work" 2>/dev/null)" ]; then
+  report=$(git_report "$work")
+  if [ "$force" = 0 ]; then
+    log "work directory $work is not empty; nothing was removed."
+    log "move or push what you need, then rerun; or use --force to delete it. contents:"
+    ls -A "$work" | head -n 20 | sed 's/^/  /' >&2
+    [ -z "$report" ] || printf '%s\n' "$report" >&2
+    exit 1
   fi
+  [ -z "$report" ] || { echo "  (--force) git repositories that will be deleted:"; printf '%s\n' "$report"; }
 fi
 
 if [ "$yes" = 0 ]; then
@@ -100,25 +97,11 @@ if [ "$has_container" = 1 ]; then
   log "removed container $name"
 fi
 
-# 3. 作業ディレクトリ（失敗したらそこで止めて内容を表示する）
-if [ "$has_wt" = 1 ]; then
-  if [ "$plain" = 1 ]; then
-    # コンテナ内の root が作ったファイルはホストでは subuid の所有になるので、podman unshare で消す
-    if [ "$force" = 1 ]; then podman unshare rm -rf -- "$wt"; else rmdir -- "$wt"; fi
-    log "removed work directory $wt"
-  else
-    if [ "$force" = 1 ]; then
-      set -- --force
-    else
-      set --
-    fi
-    if ! git -C "$REPO" worktree remove "$@" "$wt"; then
-      log "git worktree remove failed; stopped. status of $wt:"
-      git -C "$wt" status --short >&2 || true
-      exit 1
-    fi
-    log "removed worktree $wt"
-  fi
+# 3. 作業ディレクトリ（コンテナ内の root が作ったファイルはホストでは subuid の所有に
+#    なるので、podman unshare で消す）
+if [ "$has_work" = 1 ]; then
+  podman unshare rm -rf -- "$work"
+  log "removed work directory $work"
 fi
 
 # 4. ホームのボリューム
@@ -127,5 +110,4 @@ if [ "$has_volume" = 1 ]; then
   log "removed volume $vol"
 fi
 
-# 5. ブランチは消さない
-if [ "$plain" = 1 ]; then log "done"; else log "done (branch $name kept; delete it yourself if no longer needed)"; fi
+log "done"

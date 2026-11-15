@@ -1,5 +1,5 @@
 #!/bin/sh
-# ctr-list : ctr-connect が管理するコンテナ・ボリューム・worktree を一覧する。
+# ctr-list : ctr-connect が管理するコンテナ・ボリューム・作業ディレクトリを一覧する。
 set -eu
 
 CONF=${CTR_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/cubby/config.env}
@@ -7,7 +7,7 @@ if [ -r "$CONF" ]; then
   # shellcheck disable=SC1090
   . "$CONF"
 fi
-REPO=${CTR_REPO:-/srv/project}
+WORK_ROOT=${CTR_WORK_ROOT:-$HOME/cubby/work}
 CONF_DIR=$(dirname "$CONF")
 CTR_GPU_AVAILABLE=no
 CTR_GPU_INFO=
@@ -39,19 +39,19 @@ if [ -n "$outdated" ]; then
   echo "  (apply with: ctr-recreate <name>)"
 fi
 echo
-WT_ROOT=${CTR_WT_ROOT:-/srv/worktrees}
-if [ "$REPO" = none ]; then
-  echo "== worktrees: none (this host has no repository; all work directories are plain) =="
-else
-  echo "== worktrees ($REPO) =="
-  git -C "$REPO" worktree list
-fi
-echo
-echo "== work directories without git ($WT_ROOT) =="
+echo "== work directories ($WORK_ROOT) =="
 found=0
-for d in "$WT_ROOT"/ctr-* "$WT_ROOT"/gpu-*; do
-  [ -d "$d" ] && [ ! -e "$d/.git" ] || continue
+for d in "$WORK_ROOT"/ctr-* "$WORK_ROOT"/gpu-*; do
+  [ -d "$d" ] || continue
   found=1
-  echo "  $d"
+  n=$(ls -A "$d" 2>/dev/null | wc -l | tr -d ' ')
+  echo "  $d  ($n item(s))"
+  # 中の git のリポジトリ（コンテナ内で clone したものなど。深さ 3 まで）
+  find "$d" -maxdepth 3 -name .git 2>/dev/null | while IFS= read -r g; do
+    r=$(dirname "$g")
+    b=$(git -C "$r" rev-parse --abbrev-ref HEAD 2>/dev/null || echo '?')
+    st=$(git -C "$r" status --porcelain 2>/dev/null | wc -l | tr -d ' ')
+    echo "    git ${r#"$d"/} [$b] $st uncommitted"
+  done
 done
 [ "$found" = 1 ] || echo "  (none)"

@@ -2,7 +2,7 @@
 # ctr-recreate [-y] <ctr|gpu>-<work>[.<host-id>]
 #
 # コンテナだけを作り直す（次の接続で、今の設定＝追加マウントなどで作られる）。
-# ホーム（ボリューム）・worktree・ブランチはそのまま残る。
+# ホーム（ボリューム）・作業ディレクトリはそのまま残る。
 # 動いている Claude Code のセッションは止まる（記録はホームに残る）。
 set -eu
 
@@ -36,7 +36,7 @@ esac
 podman container exists "$name" || { log "no container named $name (it will be created on the next connect)"; exit 0; }
 
 echo "recreate container $name"
-echo "  kept:    volume $name-home, worktree, branch"
+echo "  kept:    volume $name-home, work directory"
 echo "  stopped: the running Claude Code session in $name (its history stays in the home volume)"
 echo "  mounts on next connect:"
 specs=$(ctr_mount_specs)
