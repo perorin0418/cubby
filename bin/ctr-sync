@@ -1,0 +1,91 @@
+#!/bin/sh
+# ctr-sync [--force] : cubby のリポジトリ（GitHub など）から最新を取得し、変わっていればこのホストに反映する。
+#
+# systemd のユーザータイマー（cubby-sync.timer）から定期的に呼ばれる（cubby add-host が設定する）。
+# 手で実行してもよい。設定は ~/.config/cubby/auto-update.env（setup-host.sh が書く）:
+#   CTR_AUTO_URL     取得するリポジトリの URL
+#   CTR_AUTO_BRANCH  ブランチ（既定 main）
+#   CTR_AUTO_GPU     setup-host.sh に渡す --gpu（auto|off）
+# 非公開リポジトリは、~/.config/cubby/deploy_key（読み取り専用のデプロイキー）で取得する。
+#
+# 反映するのは、前回反映したときからコミットが変わったときだけ（--force で常に反映）。
+# 反映 = スクリプトとイメージの定義を ~/.local/share/cubby に置き、host/setup-host.sh を実行する
+# （image/ が変わっていればイメージを作り直す）。root が要る準備は行わない。
+# 結果は ~/.local/state/cubby/sync.log と ~/.config/cubby/auto-update.state に残す。
+set -eu
+
+CONF=${CTR_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/cubby/config.env}
+CONF_DIR=$(dirname "$CONF")
+AU="$CONF_DIR/auto-update.env"
+STATE="$CONF_DIR/auto-update.state"
+SHARE=${CTR_SHARE_DIR:-$HOME/.local/share/cubby}
+SRC="$SHARE/src"
+LOG_DIR=${XDG_STATE_HOME:-$HOME/.local/state}/cubby
+LOG="$LOG_DIR/sync.log"
+
+force=0
+[ "${1:-}" = --force ] && force=1
+
+mkdir -p "$LOG_DIR"
+now() { date '+%Y-%m-%d %H:%M:%S'; }
+log() { printf '%s ctr-sync: %s\n' "$(now)" "$*" | tee -a "$LOG" >&2; }
+
+[ -r "$AU" ] || { log "auto-update is not configured ($AU missing)"; exit 0; }
+# shellcheck disable=SC1090
+. "$AU"
+URL=${CTR_AUTO_URL:-}
+BRANCH=${CTR_AUTO_BRANCH:-main}
+GPU=${CTR_AUTO_GPU:-auto}
+[ -n "$URL" ] || { log "CTR_AUTO_URL is empty in $AU"; exit 1; }
+
+# 同時に 2 つ動かさない（タイマーと手動の実行が重なったとき）
+exec 9>"$CONF_DIR/.sync.lock"
+flock -n 9 || { log "another ctr-sync is running; skipped"; exit 0; }
+
+if [ -r "$CONF_DIR/deploy_key" ]; then
+  GIT_SSH_COMMAND="ssh -i $CONF_DIR/deploy_key -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=accept-new"
+  export GIT_SSH_COMMAND
+fi
+
+record() {  # 状態: <コミット> <日時> <結果>
+  printf '%s %s %s\n' "$1" "$(date '+%Y-%m-%dT%H:%M:%S')" "$2" > "$STATE.tmp" && mv -f "$STATE.tmp" "$STATE"
+}
+
+# 取得（浅い clone。手を加えないので、取得した内容に揃える）
+if [ -d "$SRC/.git" ] && [ "$(git -C "$SRC" config --get remote.origin.url 2>/dev/null)" = "$URL" ]; then
+  if ! out=$(git -C "$SRC" fetch -q --depth 1 origin "$BRANCH" 2>&1 </dev/null); then
+    log "fetch failed from $URL ($BRANCH): $out"
+    old=$(cut -d' ' -f1 "$STATE" 2>/dev/null || true); record "${old:--}" fetch-failed; exit 1
+  fi
+  git -C "$SRC" reset -q --hard FETCH_HEAD
+else
+  rm -rf "$SRC"
+  if ! out=$(git clone -q --depth 1 -b "$BRANCH" "$URL" "$SRC" 2>&1 </dev/null); then
+    log "clone failed from $URL ($BRANCH): $out"
+    record - clone-failed; exit 1
+  fi
+fi
+new=$(git -C "$SRC" rev-parse HEAD)
+old=$(cut -d' ' -f1 "$STATE" 2>/dev/null || true)
+oldres=$(cut -d' ' -f3 "$STATE" 2>/dev/null || true)
+
+if [ "$force" = 0 ] && [ "$new" = "$old" ] && [ "$oldres" = ok ]; then
+  exit 0   # 変化なし（ログを増やさない）
+fi
+
+log "applying $(git -C "$SRC" log -1 --format='%h %s' 2>/dev/null) (was ${old:-none})"
+for d in bin host image; do
+  [ -d "$SRC/$d" ] || { log "$SRC/$d missing; not a cubby repository?"; record "$new" bad-repo; exit 1; }
+done
+rm -rf "$SHARE/bin" "$SHARE/host" "$SHARE/image"
+cp -R "$SRC/bin" "$SRC/host" "$SRC/image" "$SHARE/"
+cp "$SRC/config.env.example" "$SHARE/" 2>/dev/null || true
+
+if sh "$SHARE/host/setup-host.sh" --gpu "$GPU" </dev/null >>"$LOG" 2>&1; then
+  record "$new" ok
+  log "applied $(printf '%s' "$new" | cut -c1-12)"
+else
+  record "$new" setup-failed
+  log "setup-host.sh failed for $(printf '%s' "$new" | cut -c1-12); see $LOG"
+  exit 1
+fi

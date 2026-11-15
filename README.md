@@ -9,7 +9,7 @@ Claude Desktop の SSH 接続で、**接続名ごとに専用のコンテナ**�
 - 新しいコンテナがほしいときは、Desktop に新しい名前の SSH 接続を追加するだけです。
 - コンテナは各ホストの **rootless Podman** で動かします。
 - ホストへは **Cloudflare Tunnel**（`cloudflared access ssh`）経由で接続できます。
-- **ホスト側の事前準備は不要**です。手元の `cubby add-host` 1 回で、Podman などのインストールから、鍵の登録、イメージのビルドまで済みます。その後の更新（cubby やイメージの更新、マウントの変更）は `cubby update` で行います。
+- **ホスト側の事前準備は不要**です。手元の `cubby add-host` 1 回で、Podman などのインストールから、鍵の登録、イメージのビルドまで済みます。その後、このリポジトリに push した変更（Dockerfile やスクリプト）は、**各ホストが自動で取得して反映**します。
 - Claude Desktop を動かす手元の PC は **Windows・macOS・Linux** に対応します。複数の PC から同じホストを使えます。
 
 コマンド・オプション・設定の一覧は「[コマンドとオプション一覧](#コマンドとオプション一覧)」にまとめています。
@@ -55,6 +55,7 @@ bin/ctr-connect         ProxyCommand から呼ばれる本体（ホスト側）
 bin/ctr-list            コンテナ・ボリューム・作業ディレクトリの一覧（ホスト側）
 bin/ctr-remove          片付け（ホスト側）
 bin/ctr-recreate        コンテナだけを作り直す（マウントの設定の反映。ホスト側）
+bin/ctr-sync            自動更新の本体（リポジトリの最新を取得して反映する。ホスト側）
 bin/ctr-common.sh       ホスト側のスクリプトが共有する部分（追加マウントの解釈）
 host/bootstrap-root.sh  root が要るホストの準備（cubby add-host が必要なときだけ sudo で実行する）
 host/setup-host.sh      ホストの準備（cubby add-host が自動で実行する）
@@ -144,7 +145,7 @@ ssh ctr-test.lab1 hostname   # → ctr-test と返れば完了（Windows は Pow
   - 作業名は `ctr-`（GPU なし）または `gpu-`（GPU あり）で始まる英小文字・数字・ハイフン、44 文字以内
   - 同じ作業名でもホストが違えば別のコンテナです（`ctr-feature1.lab1` と `ctr-feature1.lab2`）
 - **続きから作業する**: 同じ接続を選びます。Desktop を再起動しても同じコンテナに戻ります。
-- **cubby やイメージを更新したとき・マウントを変えるとき**: `sh client/cubby update`（全ホスト）または `sh client/cubby update lab1`。登録時の設定のまま、スクリプトの転送と、必要ならイメージの作り直しを行います。
+- **cubby やイメージを更新したとき**: commit して push すれば、各ホストが自動で反映します（「自動更新」を参照）。すぐ反映したいとき・マウントを変えるときは `sh client/cubby update`（全ホスト）または `sh client/cubby update lab1`。
 - **一覧を見る**: 手元で `sh client/cubby list`（全ホスト）、`sh client/cubby list lab1`（指定したホストだけ）。登録済みのホストは `sh client/cubby hosts`。
 
 Desktop には登録した SSH 接続を編集・削除する画面がない時期がありました。接続名は作業単位で使い回す運用をおすすめします。
@@ -204,19 +205,32 @@ sh client/cubby hosts
 - コンテナにはホストのドライバのライブラリと `nvidia-smi` が入ります。CUDA Toolkit は入れていないので、PyTorch など CUDA を同梱するパッケージを使うか、コンテナ内で入れてください。
 - **AMD の GPU** は自動では準備しません。ホストの `~/.config/cubby/config.env` に `CTR_GPU_ARGS="--device /dev/kfd --device /dev/dri --group-add keep-groups"` のように書いて `cubby update <id>` を実行すると、その指定で起動できるかを確かめ、`gpu-` の接続で使えるようになります。
 
+## 自動更新（リポジトリに push すると各ホストに反映）
+
+各ホストは、この cubby のリポジトリ（GitHub）を**定期的に取得し、新しいコミットがあれば自動で反映**します（既定 15 分ごと）。Dockerfile やスクリプトを変えたら、**commit して push するだけ**で、全ホストに行き渡ります。
+
+- `cubby add-host` が、手元の cubby のクローンの `origin`（例 `https://github.com/perorin0418/cubby.git`）と今のブランチを使って設定します。公開リポジトリは https で、非公開リポジトリは各ホスト用の読み取り専用のデプロイキーで取得します（`gh` にログインしていれば、デプロイキーの GitHub への登録も自動）。
+- ホストでは systemd のユーザータイマー `cubby-sync.timer` が `ctr-sync` を実行します（linger が有効なので、ログアウト中も動きます）。systemd のユーザーセッションがない環境では cron で代用します。
+- 反映 = 取得したスクリプトとイメージの定義をホストに置き、`image/` が変わっていればイメージを作り直す。root が要る準備（パッケージの追加など）は行いません（必要なら `cubby update`）。
+- 結果はホストの `ctr-list`（手元からは `cubby list`）の `auto-update:` の行（最後に反映したコミット・日時・結果）と、`~/.local/state/cubby/sync.log` で見られます。すぐに反映したいときは、ホストで `ctr-sync` を実行するか、手元から `cubby update` を実行します。
+- **手元の未 push の変更は反映されません**。ホストは GitHub の内容に揃います（`add-host` / `update` で手元の内容を転送しても、次に新しいコミットが push されたときに GitHub の内容で上書きされます）。手元に未コミット・未 push の変更があれば、`add-host` / `update` が警告します。
+- push できる人は、全ホストで動くスクリプトとイメージを変えられます（ログインユーザーの権限で動きます）。リポジトリの書き込み権限の管理に注意してください。
+- 止めるには `cubby add-host <id> ... --no-auto-update`、間隔・ブランチ・取得元は `--auto-update-interval 1h`・`--auto-update-branch main`・`--auto-update-url URL` で変えられます。
+
 ## コンテナイメージのカスタマイズ
 
 コンテナイメージは、このリポジトリの `image/Dockerfile` から**各ホストの上で**ビルドします（rootless Podman の `podman build`）。必要なパッケージなどは Dockerfile に追記してください。
 
 ```sh
-# 1. image/Dockerfile を編集する（例: apt-get install の行に python3 を足す）
-# 2. ホストに反映する（全ホスト。ホストを指定してもよい）
+# 1. image/Dockerfile を編集して commit・push する（例: apt-get install の行に python3 を足す）
+git commit -am "image: add python3" && git push
+# 2. 各ホストが自動で取得してイメージを作り直す（既定 15 分以内）。すぐ反映したいなら:
 sh client/cubby update
 # 3. 既存のコンテナを新しいイメージで作り直す（ホストで、コンテナごとに）
 ctr-recreate ctr-feature1
 ```
 
-- `cubby update` は `image/` の中身（Dockerfile など）のハッシュをイメージのラベル（`cubby.image-hash`）と比べ、**変わっていれば自動で作り直します**。変わっていなければ作り直しません（`--rebuild` で強制できます）。
+- 自動更新と `cubby update` は `image/` の中身（Dockerfile など）のハッシュをイメージのラベル（`cubby.image-hash`）と比べ、**変わっていれば自動で作り直します**。変わっていなければ作り直しません（`--rebuild` で強制できます）。
 - 作り直しても、既存のコンテナは古いイメージのままです（セッションが切れるので自動では作り直しません）。古いイメージのコンテナは `update` の出力・`ctr-list`（`cubby list`）・接続時のメッセージで知らせるので、`ctr-recreate <名前>` で作り直してください。ホームと作業ディレクトリは残ります。
 - Dockerfile に `USER` 行やユーザーの作成は書かないでください（起動時にホストのユーザーを登録する `ctr-entrypoint` と食い違います）。
 - ベースイメージ（`debian:bookworm-slim`）は、ホストにキャッシュされたものを使います。Debian の更新を取り込みたいときは、ホストで `podman pull docker.io/library/debian:bookworm-slim` してから `cubby update <id> --rebuild` を実行します。
@@ -316,6 +330,10 @@ macOS・Linux・Git Bash は `sh client/cubby ...`、Windows の PowerShell は 
 | `--no-gpu` | GPU を自動判定 | GPU の準備（NVIDIA Container Toolkit の導入・CDI の定義の作成）をしない |
 | `--rebuild` | 必要なときだけ | コンテナイメージを作り直す（イメージの版が古いときは指定しなくても作り直す） |
 | `--replace-hostkey` | なし | コンテナのホスト鍵が known_hosts の記録と違っても置き換える（ホスト側で鍵を作り直したとき） |
+| `--no-auto-update` | 自動更新あり | 自動更新（ホストが cubby のリポジトリを定期的に取得して反映する）を止める |
+| `--auto-update-url URL` | 手元のクローンの `origin` | 自動更新で取得するリポジトリ |
+| `--auto-update-branch BRANCH` | 手元のクローンの今のブランチ | 自動更新で取得するブランチ |
+| `--auto-update-interval TIME` | `15min` | 自動更新の間隔（systemd の書式。例 `5min`、`1h`） |
 
 - 登録の設定は `~/.ssh/config` の cubby ブロックの `# cubby-args:` の行に記録され、`cubby update` はそれを使って実行し直します。
 - `--mount` / `--unmount` / `--work-root` などで変えた設定を既存のコンテナに反映するには、ホストで `ctr-recreate <名前>` を実行します。
@@ -341,6 +359,7 @@ macOS・Linux・Git Bash は `sh client/cubby ...`、Windows の PowerShell は 
 | `ctr-list` | このホストのコンテナ・ボリューム・追加マウント（設定が古いコンテナ）・作業ディレクトリ（中のリポジトリのブランチと未コミットの変更の数）を一覧する |
 | `ctr-remove [-y] [--force] <名前>` | コンテナ・作業ディレクトリ・ホームのボリュームを消す。作業ディレクトリが空でなければ、何も消さずに止まる（中のリポジトリの未コミット・未 push も表示）。`-y` で確認を省略、`--force` で中身があっても消す |
 | `ctr-recreate [-y] <名前>` | コンテナだけを作り直す（ホームと作業ディレクトリは残る）。次の接続で今の設定（追加マウント・sudo など）のコンテナが作られる。`-y` で確認を省略 |
+| `ctr-sync [--force]` | 自動更新の本体。cubby のリポジトリを取得し、新しいコミットがあれば反映する（タイマーから定期的に実行される。手で実行すればすぐ反映）。`--force` でコミットが同じでも反映し直す |
 | `ctr-connect <接続名>` | ssh_config の ProxyCommand から呼ばれる本体。手で実行するのは調査のときだけ（例 `ctr-connect ctr-x.lab1 </dev/null \| head -c 8` が `SSH-2.0-` を返すか） |
 
 `<名前>` は `ctr-<作業名>` / `gpu-<作業名>`。接続名（`ctr-feature1.lab1`）をそのまま渡してもかまいません。
@@ -392,7 +411,12 @@ sh tests/smoke.sh <id> [--cleanup]
 |---|---|
 | `~/.config/cubby/mounts` | 追加マウントの一覧（`--mount` / `--unmount` で編集。直接編集してもよい） |
 | `~/.config/cubby/detected.env` | `add-host` が自動で書く検出結果（GPU が使えるか）。編集しない |
-| `~/.local/share/cubby/` | `add-host` が転送した cubby のスクリプトとイメージの定義 |
+| `~/.local/share/cubby/` | cubby のスクリプトとイメージの定義（`add-host` / `update` の転送、または自動更新で置かれる）。`src/` は自動更新で取得したリポジトリ |
+| `~/.config/cubby/auto-update.env` | 自動更新の設定（取得元・ブランチ・間隔）。`add-host` が書く |
+| `~/.config/cubby/auto-update.state` | 自動更新で最後に反映したコミット・日時・結果 |
+| `~/.config/cubby/deploy_key` | 非公開リポジトリを取得するための読み取り専用のデプロイキー（非公開のときだけ） |
+| `~/.config/systemd/user/cubby-sync.{service,timer}` | 自動更新のタイマー |
+| `~/.local/state/cubby/sync.log` | 自動更新のログ |
 
 ### 手元の環境変数
 
@@ -414,6 +438,9 @@ sh tests/smoke.sh <id> [--cleanup]
 | `this host has no usable GPU` | `cubby hosts` の `gpu=`。ホストで `nvidia-smi` が通るか（ドライバ）。通るなら `cubby update <id>` |
 | `gpu=no` なのに GPU がある | ドライバの更新後なら `cubby update <id>` で CDI の定義を作り直す。`update` の出力の `WARNING`（toolkit の導入や `nvidia-ctk cdi generate` の失敗） |
 | コンテナにマウントが見えない | `ctr-list` の extra mounts（ホストにないパスは飛ばされる）。設定を変えた後なら `ctr-recreate <名前>` |
+| `auto-update: ... -> fetch-failed` / `clone-failed` | ホストからリポジトリに届くか（ネットワーク）。非公開リポジトリならデプロイキーが GitHub に登録されているか。ホストで `ctr-sync` を実行するとエラーが見える |
+| `auto-update: ... -> setup-failed` | 反映（イメージのビルドなど）に失敗した。ホストの `~/.local/state/cubby/sync.log`。次の間隔で再試行する |
+| push したのに反映されない | 間隔（既定 15 分）を待つか、ホストで `ctr-sync`。`ctr-list` の `auto-update:` の行のブランチが push したブランチか |
 | `containers still using an older image` / `the image was rebuilt since ...` | イメージを作り直した後、古いイメージのままのコンテナがある。反映するならホストで `ctr-recreate <名前>` |
 | `mount settings changed since ...` | マウントの設定が変わった。反映するならホストで `ctr-recreate <名前>` |
 | `sudo: a password is required` | ホストの `config.env` が `CTR_SUDO=no` になっていないか。旧版のイメージで作ったコンテナなら `cubby update <id>` の後に `ctr-recreate <名前>` |
@@ -457,6 +484,7 @@ sh tests/smoke.sh <id> [--cleanup]
 | — | `~/.ssh/config` の書き換えを mkdir のロックで排他し、別のファイルに書いてから置き換える | 複数の `add-host` を同時に動かすと、互いのブロックを上書きしたり、書き換え中のファイルを ssh が読んで失敗したりしたため（検証で判明） |
 | コンテナ内に `dev` ユーザーを作り（UID/GID をホストに合わせてイメージをビルド）、`dev` でログイン | ユーザーは作らない。起動時にホストのログインユーザー（同じ名前・UID・GID・ホームのパス）をコンテナの `/etc/passwd` に登録し、その名前でログインする。イメージはホストに依存しない（版のラベルで古いイメージを自動で作り直す） | 権限の食い違いを避けるため（利用者の要望） |
 | コンテナ内で sudo は使えない | ホストのユーザーにパスワードなしの sudo を許可（`CTR_SUDO=no` で無効） | 利用者の要望。コンテナ内の root はホストの root ではないため |
+| ホストの更新は手作業 | 各ホストが cubby のリポジトリを定期的に取得し、新しいコミットを自動で反映する（systemd のユーザータイマー・`ctr-sync`） | 利用者の要望（Dockerfile などの変更を自動で行き渡らせるため） |
 | イメージの作り直しは手作業（`docker build`） | `cubby update` が `image/` の中身のハッシュを比べ、変わっていれば自動で作り直す。古いイメージのコンテナを知らせる。登録後の更新は `add-host` ではなく `cubby update`（登録時の設定を記録して使う） | 利用者の要望 |
 | `docker run --init` | イメージに tini を入れて PID 1 にする | ホストの catatonit の有無に依存しないため |
 | 手元は macOS・Linux の OpenSSH 前提、`~/.ssh/config` に手で追記 | Windows・macOS・Linux に対応。`~/.ssh/config` の先頭に管理ブロックを書く（`Include` は使わない）。ProxyCommand は絶対パス。Windows は Windows 標準の OpenSSH を使う | 利用者の要望。GUI から起動した Desktop の PATH が最小限のため |

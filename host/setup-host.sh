@@ -29,11 +29,16 @@ die()  { printf 'setup-host: ERROR: %s\n' "$*" >&2; exit 1; }
 
 id_arg= work_arg= pubkeys= rebuild=0 gpu_mode=auto
 add_mounts= del_mounts=
+auto_url= auto_branch= auto_interval= auto_off=0
 nl='
 '
 while [ $# -gt 0 ]; do
   case "$1" in
     --gpu)       gpu_mode=$2; shift 2 ;;
+    --auto-update)          auto_url=$2; shift 2 ;;
+    --auto-update-branch)   auto_branch=$2; shift 2 ;;
+    --auto-update-interval) auto_interval=$2; shift 2 ;;
+    --no-auto-update)       auto_off=1; shift ;;
     --mount)     add_mounts="$add_mounts$2$nl"; shift 2 ;;
     --unmount)   del_mounts="$del_mounts$2$nl"; shift 2 ;;
     --id)        id_arg=$2; shift 2 ;;
@@ -122,11 +127,93 @@ fi
 
 # スクリプト
 mkdir -p "$BIN_DIR"
-for f in ctr-connect ctr-list ctr-remove ctr-recreate ctr-common.sh; do
+for f in ctr-connect ctr-list ctr-remove ctr-recreate ctr-sync ctr-common.sh; do
   mode=755; case "$f" in *.sh) mode=644 ;; esac
   cp "$here/bin/$f" "$BIN_DIR/$f.tmp" && chmod "$mode" "$BIN_DIR/$f.tmp" && mv -f "$BIN_DIR/$f.tmp" "$BIN_DIR/$f"
 done
-log "installed ctr-connect ctr-list ctr-remove ctr-recreate to $BIN_DIR"
+log "installed ctr-connect ctr-list ctr-remove ctr-recreate ctr-sync to $BIN_DIR"
+
+# 自動更新（ctr-sync を定期的に実行して、リポジトリの最新を反映する）
+AU="$CONF_DIR/auto-update.env"
+UNIT_DIR=${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user
+user_systemctl() {
+  # SSH のセッションに XDG_RUNTIME_DIR がないことがある（linger が有効ならユーザーの systemd は動いている）
+  [ -n "${XDG_RUNTIME_DIR:-}" ] || [ ! -d "/run/user/$(id -u)" ] || export XDG_RUNTIME_DIR="/run/user/$(id -u)"
+  systemctl --user "$@"
+}
+if [ "$auto_off" = 1 ]; then
+  if [ -e "$AU" ] || [ -e "$UNIT_DIR/cubby-sync.timer" ]; then
+    user_systemctl disable --now cubby-sync.timer >/dev/null 2>&1 || true
+    rm -f "$AU" "$UNIT_DIR/cubby-sync.timer" "$UNIT_DIR/cubby-sync.service"
+    user_systemctl daemon-reload >/dev/null 2>&1 || true
+    crontab -l 2>/dev/null | grep -v 'ctr-sync' | crontab - 2>/dev/null || true
+    log "auto-update disabled"
+  fi
+elif [ -n "$auto_url" ]; then
+  au_branch=${auto_branch:-main}
+  au_interval=${auto_interval:-15min}
+  case "$au_interval" in *[!0-9a-z]*|'') die "invalid --auto-update-interval: $au_interval (e.g. 15min, 1h)" ;; esac
+  {
+    echo "# written by setup-host.sh (cubby add-host). Re-run add-host to change."
+    echo "CTR_AUTO_URL='$auto_url'"
+    echo "CTR_AUTO_BRANCH='$au_branch'"
+    echo "CTR_AUTO_GPU='$gpu_mode'"
+    echo "CTR_AUTO_INTERVAL='$au_interval'"
+  } > "$AU"
+  # ssh の URL（git@... / ssh://...）は、このホスト用の読み取り専用のデプロイキーで取得する
+  case "$auto_url" in
+    git@*|ssh://*)
+      if [ ! -e "$CONF_DIR/deploy_key" ]; then
+        ssh-keygen -q -t ed25519 -N '' -C "cubby-deploy-${CTR_HOST_ID:-$(hostname)}" -f "$CONF_DIR/deploy_key" </dev/null
+        log "generated deploy key $CONF_DIR/deploy_key"
+      fi
+      chmod 600 "$CONF_DIR/deploy_key" ;;
+  esac
+  log "auto-update: $auto_url ($au_branch) every $au_interval"
+fi
+# タイマー（自動更新が設定されていれば、毎回入れ直す）
+auto_mode=off
+if [ -r "$AU" ]; then
+  # shellcheck disable=SC1090
+  . "$AU"
+  interval=${CTR_AUTO_INTERVAL:-15min}
+  if command -v systemctl >/dev/null 2>&1 && user_systemctl show-environment >/dev/null 2>&1; then
+    mkdir -p "$UNIT_DIR"
+    cat > "$UNIT_DIR/cubby-sync.service" <<EOF
+[Unit]
+Description=cubby: apply the latest cubby repository to this host
+
+[Service]
+Type=oneshot
+ExecStart=$BIN_DIR/ctr-sync
+EOF
+    cat > "$UNIT_DIR/cubby-sync.timer" <<EOF
+[Unit]
+Description=cubby: check the cubby repository every $interval
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=$interval
+RandomizedDelaySec=1min
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+EOF
+    user_systemctl daemon-reload && user_systemctl enable --now cubby-sync.timer >/dev/null 2>&1 \
+      && auto_mode="systemd timer (every $interval)" \
+      || warn "could not enable the systemd user timer cubby-sync.timer"
+  elif command -v crontab >/dev/null 2>&1; then
+    # systemd のユーザーセッションがない環境: cron で代用する（間隔は分単位に丸める）
+    mins=$(printf '%s' "$interval" | sed -n 's/^\([0-9][0-9]*\)min$/\1/p;s/^\([0-9][0-9]*\)h$/\1 60/p' | awk 'NF==2{print $1*$2;next}{print}')
+    mins=${mins:-15}
+    { crontab -l 2>/dev/null | grep -v 'ctr-sync'; echo "*/$mins * * * * $BIN_DIR/ctr-sync >/dev/null 2>&1"; } | crontab - \
+      && auto_mode="cron (every ${mins}min)" || warn "could not install a crontab entry for ctr-sync"
+  else
+    warn "auto-update is configured, but neither a systemd user session nor cron is available; run ctr-sync yourself"
+    auto_mode="configured (no scheduler)"
+  fi
+fi
 
 # 追加マウント（~/.config/cubby/mounts）。--mount は同じホストのパスの行を置き換えて追記、
 # --unmount はそのホストのパスの行を消す。手で書いた他の行やコメントは残す。
@@ -179,6 +266,8 @@ fi
 # イメージ。利用者のユーザーはイメージに含めない（起動時にホストのユーザーを登録する）ので、
 # ホストに依存しない。image/ の中身（Dockerfile など）のハッシュをラベル cubby.image-hash に
 # 記録し、中身が変わっていれば自動で作り直す（--rebuild なら常に作り直す）。
+# Windows のエディタで保存して改行が CRLF になっていると RUN 行が壊れるので、LF に揃えてからビルドする
+find "$here/image" -type f -exec sed -i 's/\r$//' {} + 2>/dev/null || true
 img_hash=$(cd "$here/image" && find . -type f | LC_ALL=C sort | while IFS= read -r f; do
              printf '%s  ' "$f"; sha256sum < "$f" | cut -d' ' -f1
            done | sha256sum | cut -c1-16)
@@ -261,5 +350,7 @@ done
 
 log "done (host id: ${CTR_HOST_ID:-unset})"
 printf 'CUBBY_USER %s\n' "$(id -un)"
+printf 'CUBBY_AUTO %s\n' "$auto_mode"
+[ ! -r "$CONF_DIR/deploy_key.pub" ] || [ ! -r "$AU" ] || printf 'CUBBY_DEPLOY_KEY %s\n' "$(cat "$CONF_DIR/deploy_key.pub")"
 printf 'CUBBY_GPU %s %s\n' "$gpu_avail" "$gpu_info"
 printf 'CUBBY_HOSTKEY %s\n' "$(cut -d' ' -f1,2 "$key.pub")"

@@ -71,6 +71,47 @@ no_quote() {
 cfgval() {
   case "$1" in *' '*) printf '"%s"' "$1" ;; *) printf '%s' "$1" ;; esac
 }
+# GitHub のリポジトリの URL から owner/repo を取り出す（GitHub でなければ空）
+github_slug() {
+  printf '%s\n' "$1" | sed -n \
+    -e 's#^git@github\.com:\([^/]*/[^/]*\)$#\1#p' \
+    -e 's#^ssh://git@github\.com/\([^/]*/[^/]*\)$#\1#p' \
+    -e 's#^https://github\.com/\([^/]*/[^/]*\)$#\1#p' | sed 's/\.git$//; s#/$##' | head -n 1
+}
+
+# 手元の cubby に、ホストが取得できない変更（未コミット・未 push）があれば知らせる
+warn_unpushed() {
+  dirty=$(git -C "$here" status --porcelain -- bin host image config.env.example 2>/dev/null | head -n 1)
+  ahead=$(git -C "$here" rev-list --count "origin/$1..HEAD" 2>/dev/null || echo 0)
+  if [ -n "$dirty" ] || [ "${ahead:-0}" != 0 ]; then
+    log "WARNING: this cubby has uncommitted or unpushed changes; hosts with auto-update follow origin/$1, so commit and push them"
+  fi
+}
+
+# デプロイキー（読み取り専用）を GitHub のリポジトリに登録する（gh が使えれば自動、なければ案内）
+register_deploy_key() {
+  slug=$1 pub=$2 title=$3
+  body=$(printf '%s' "$pub" | cut -d' ' -f2)
+  if command -v gh >/dev/null 2>&1 && gh auth status >/dev/null 2>&1; then
+    if gh repo deploy-key list --repo "$slug" 2>/dev/null | grep -qF "$body"; then
+      log "auto-update: deploy key for this host is already registered on $slug"
+      return 0
+    fi
+    kf=$(mktemp)
+    printf '%s\n' "$pub" > "$kf"
+    if gh repo deploy-key add "$(natpath "$kf")" --repo "$slug" --title "$title" >/dev/null 2>&1; then
+      log "auto-update: registered a read-only deploy key on github.com/$slug (title: $title)"
+      rm -f "$kf"; return 0
+    fi
+    rm -f "$kf"
+    log "WARNING: auto-update: could not register the deploy key with gh (need admin rights on $slug?)"
+  else
+    log "auto-update: gh is not available or not logged in; register the deploy key yourself:"
+  fi
+  log "  https://github.com/$slug/settings/keys/new  (title: $title, read-only)"
+  log "  $pub"
+}
+
 # 管理ブロックの「Host ctr-*...」の User（コンテナのログインユーザー）を読む
 ctr_user_of() {
   awk -v id="$1" '
@@ -245,6 +286,7 @@ cmd_add_host() {
   id=${1:-}; [ $# -gt 0 ] && shift
   valid_id "$id" || die "invalid id '$id' (lowercase letters, digits and '-', up to 32 chars)"
   alias_name=$id hostname= user= port= cloudflared=0 identity= key= wt= rebuild=0 replace=0 gpu_mode=auto mount_args=
+  auto=on auto_url= auto_branch= auto_interval=
   while [ $# -gt 0 ]; do
     case "$1" in
       --hostname)        hostname=$2; shift 2 ;;
@@ -260,6 +302,10 @@ cmd_add_host() {
       --rebuild)         rebuild=1; shift ;;
       --replace-hostkey) replace=1; shift ;;
       --no-gpu)          gpu_mode=off; shift ;;
+      --no-auto-update)        auto=off; shift ;;
+      --auto-update-url)       auto_url=$2; shift 2 ;;
+      --auto-update-branch)    auto_branch=$2; shift 2 ;;
+      --auto-update-interval)  auto_interval=$2; shift 2 ;;
       --mount)           no_quote mount "$2"; mount_args="$mount_args --mount $2"; shift 2 ;;
       --unmount)         no_quote unmount "$2"; mount_args="$mount_args --unmount $2"; shift 2 ;;
       *) s=$(suggest_option "$1")
@@ -280,6 +326,13 @@ cmd_add_host() {
   [ -z "$key" ]             || saved_args="$saved_args --key $(natpath "$key")"
   [ -z "$wt" ]              || saved_args="$saved_args --work-root $wt"
   [ "$gpu_mode" = auto ]    || saved_args="$saved_args --no-gpu"
+  [ "$auto" = on ]          || saved_args="$saved_args --no-auto-update"
+  [ -z "$auto_url" ]        || saved_args="$saved_args --auto-update-url $auto_url"
+  [ -z "$auto_branch" ]     || saved_args="$saved_args --auto-update-branch $auto_branch"
+  [ -z "$auto_interval" ]   || saved_args="$saved_args --auto-update-interval $auto_interval"
+  for v in "auto-update-url:$auto_url" "auto-update-branch:$auto_branch" "auto-update-interval:$auto_interval"; do
+    no_quote "${v%%:*}" "${v#*:}"
+  done
   if [ -n "$identity" ]; then
     [ -r "$identity" ] || die "cannot read --identity $identity"
     # --key がなければ、--identity の公開鍵をコンテナにも登録する
@@ -418,6 +471,33 @@ add_host_rest() {
   args="--id $id --pubkeys - --gpu $gpu_mode$mount_args"
   [ -z "$wt" ] || args="$args --work-root $wt"
   [ "$rebuild" = 1 ] && args="$args --rebuild"
+  # 自動更新: ホストが cubby のリポジトリ（このクローンの origin）を定期的に取得して反映する
+  au_url= au_slug=
+  if [ "$auto" = off ]; then
+    args="$args --no-auto-update"
+  else
+    au_url=$auto_url
+    [ -n "$au_url" ] || au_url=$(git -C "$here" remote get-url origin 2>/dev/null || true)
+    if [ -z "$au_url" ]; then
+      log "auto-update: skipped (this cubby directory has no git remote 'origin'; pass --auto-update-url URL)"
+    else
+      au_slug=$(github_slug "$au_url")
+      if [ -n "$au_slug" ]; then
+        # GitHub: 公開リポジトリなら https で（鍵なし）、非公開ならデプロイキー付きの ssh で取得する
+        if [ "$(gh repo view "$au_slug" --json visibility -q .visibility 2>/dev/null)" = PUBLIC ]; then
+          au_url="https://github.com/$au_slug.git"
+        else
+          au_url="git@github.com:$au_slug.git"
+        fi
+      fi
+      au_branch=${auto_branch:-$(git -C "$here" rev-parse --abbrev-ref HEAD 2>/dev/null || echo main)}
+      [ "$au_branch" != HEAD ] || au_branch=main
+      no_quote auto-update-url "$au_url"; no_quote auto-update-branch "$au_branch"
+      args="$args --auto-update $au_url --auto-update-branch $au_branch"
+      [ -z "$auto_interval" ] || args="$args --auto-update-interval $auto_interval"
+      warn_unpushed "$au_branch"
+    fi
+  fi
   log "running setup-host.sh on $alias_name (building the image takes a few minutes when needed)"
   rssh "$alias_name" "sh $REMOTE_SHARE/host/setup-host.sh $args" < "$tmp" > "$tmp.out" \
     || die "setup-host.sh failed on $alias_name"
@@ -438,6 +518,27 @@ add_host_rest() {
     log "replaced container host key cubby-$id in $KNOWN_HOSTS"
   else
     die "container host key for cubby-$id changed on $alias_name. If this is expected, rerun with --replace-hostkey"
+  fi
+
+  # 自動更新: デプロイキーを GitHub に登録し、最初の取得を試す
+  auto_line=$(sed -n 's/^CUBBY_AUTO //p' "$tmp.out" | tr -d '\r' | head -n 1)
+  if [ -n "$au_url" ]; then
+    dkey=$(sed -n 's/^CUBBY_DEPLOY_KEY //p' "$tmp.out" | tr -d '\r' | head -n 1)
+    if [ -n "$dkey" ] && [ -n "$au_slug" ]; then
+      register_deploy_key "$au_slug" "$dkey" "cubby $id ($alias_name)"
+    elif [ -n "$dkey" ]; then
+      log "auto-update: add this read-only deploy key to $au_url so $alias_name can fetch it:"
+      log "  $dkey"
+    fi
+    log "auto-update: first sync on $alias_name ..."
+    if rssh "$alias_name" "$REMOTE_BIN/ctr-sync" </dev/null 2>&1 | sed 's/^/  /' >&2; then :; fi
+    st=$(rssh "$alias_name" 'cat "${XDG_CONFIG_HOME:-$HOME/.config}/cubby/auto-update.state" 2>/dev/null' </dev/null | tr -d '\r')
+    case "$st" in
+      *' ok') log "auto-update: on ($auto_line); $alias_name follows $au_url ($au_branch)" ;;
+      *) log "WARNING: auto-update: the first sync did not succeed ($st); it retries every interval. Check the deploy key / network, or run ctr-sync on the host" ;;
+    esac
+  elif [ "$auto" = off ]; then
+    log "auto-update: off (use cubby update $id to apply changes)"
   fi
 
   # GPU の有無を管理ブロックに書き直す
