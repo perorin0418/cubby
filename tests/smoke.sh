@@ -2,6 +2,7 @@
 # tests/smoke.sh <host-id> [--cleanup]
 #
 # 受け入れテストのうち CLI で確かめられる項目（1〜6, 11, 12）を、手元の PC から実行する。
+# Windows（Git Bash）・macOS・Linux で動く。ssh は cubby と同じもの（Windows は Windows 標準の OpenSSH）を使う。
 #
 # 前提: `client/cubby add-host <host-id> ...` を実行済み（ssh_config・鍵・イメージが揃っている）。
 #
@@ -20,12 +21,11 @@ ID=${1:-}
 cleanup=0
 [ "${2:-}" = --cleanup ] && cleanup=1
 
-SSH_DIR=${CUBBY_SSH_DIR:-$HOME/.ssh}
-CONF="$SSH_DIR/cubby/$ID.conf"
-[ -r "$CONF" ] || { echo "$CONF not found; run: client/cubby add-host $ID ..." >&2; exit 2; }
-REMOTE=$(sed -n 's/^# cubby-ssh-host: //p' "$CONF" | head -n 1)
-SSHF=
-[ "$SSH_DIR" = "$HOME/.ssh" ] || SSHF="-F $SSH_DIR/config"
+here=$(cd "$(dirname "$0")/.." && pwd)
+# shellcheck source=client/cubby-lib.sh
+. "$here/client/cubby-lib.sh"
+REMOTE=$(cubby_alias_of "$ID")
+[ -n "$REMOTE" ] || { echo "host $ID is not registered in $SSH_CONFIG; run: client/cubby add-host $ID ..." >&2; exit 2; }
 RBIN=.local/bin
 REPO=${CTR_REPO:-/srv/project}
 WT_ROOT=${CTR_WT_ROOT:-/srv/worktrees}
@@ -34,22 +34,16 @@ CONN="$NAME.$ID"
 WT="$WT_ROOT/$NAME"
 
 pass=0; fail=0; skip=0
-ok()   { pass=$((pass + 1)); printf 'PASS  %s
-' "$*"; }
-ng()   { fail=$((fail + 1)); printf 'FAIL  %s
-' "$*"; }
-sk()   { skip=$((skip + 1)); printf 'SKIP  %s
-' "$*"; }
-info() { printf '      %s
-' "$*"; }
+ok()   { pass=$((pass + 1)); printf 'PASS  %s\n' "$*"; }
+ng()   { fail=$((fail + 1)); printf 'FAIL  %s\n' "$*"; }
+sk()   { skip=$((skip + 1)); printf 'SKIP  %s\n' "$*"; }
+info() { printf '      %s\n' "$*"; }
 
 # リモートホストでシェル文字列を実行する
-# shellcheck disable=SC2086
-remote() { ssh $SSHF -o BatchMode=yes "$REMOTE" "$1" </dev/null; }
+remote() { rssh -o BatchMode=yes "$REMOTE" "$1" </dev/null; }
 
 # コンテナに SSH で入ってシェル文字列を実行する
-# shellcheck disable=SC2086
-cssh() { ssh $SSHF -o BatchMode=yes "$CONN" "$1" </dev/null; }
+cssh() { rssh -o BatchMode=yes "$CONN" "$1" </dev/null; }
 
 count_containers() {
   remote "podman ps -aq --filter label=ctr.name=$NAME | wc -l" | tr -d ' \r'

@@ -6,16 +6,17 @@ Claude Desktop の SSH 接続で、**接続名ごとに専用のコンテナ**�
 - 同じ接続名なら、何度つないでも同じコンテナに戻ります。
 - 違う接続名なら、別のコンテナ・別の作業ディレクトリ（git worktree）になります。
 - 新しいコンテナがほしいときは、Desktop に新しい名前の SSH 接続を追加するだけです。
-- コンテナは各ホストの **rootless Podman** で動かします（ホストで sudo は不要）。
+- コンテナは各ホストの **rootless Podman** で動かします。
 - ホストへは **Cloudflare Tunnel**（`cloudflared access ssh`）経由で接続できます。
-- ホストの登録・公開鍵の登録・ホスト鍵の受け入れは、手元の `cubby add-host` 1 回で済みます。
+- **ホスト側の事前準備は不要**です。手元の `cubby add-host` 1 回で、Podman などのインストールから、元リポジトリの clone、鍵の登録、イメージのビルドまで済みます。
+- Claude Desktop を動かす手元の PC は **Windows・macOS・Linux** に対応します。
 
 当初の設計は [docs/handoff-ctr-connect.md](docs/handoff-ctr-connect.md) と [docs/claude-desktop-ssh-container.html](docs/claude-desktop-ssh-container.html) にあります（Docker・単一ホスト前提。変更点は末尾の「設計からの変更点」を参照）。
 
 ## しくみ
 
 ```
-Claude Desktop ──SSH(ctr-feat.gpu1)──▶ ~/.ssh/cubby/gpu1.conf の Host ctr-*.gpu1
+Claude Desktop ──SSH(ctr-feat.gpu1)──▶ ~/.ssh/config の cubby ブロックの Host ctr-*.gpu1
    ProxyCommand: ssh gpu1 .local/bin/ctr-connect ctr-feat.gpu1
                   │  └ Host gpu1 は ProxyCommand cloudflared access ssh（Cloudflare Tunnel）
                   ▼
@@ -42,8 +43,12 @@ Claude Desktop ──SSH(ctr-feat.gpu1)──▶ ~/.ssh/cubby/gpu1.conf の Host
 ## リポジトリの中身
 
 ```
-client/cubby            手元で使うコマンド（ホストの登録・一覧・事前確認）
-client/ssh_config.snippet  cubby が書く ssh_config の例
+client/cubby            手元で使うコマンド（ホストの登録・一覧・事前確認）。sh スクリプト
+client/cubby-lib.sh     OS ごとの差（ssh の選択・パスの形式）を吸収する共通部分
+client/cubby.ps1        Windows の PowerShell から cubby を実行するラッパー
+client/cubby.cmd        Windows の cmd.exe から cubby を実行するラッパー
+client/ssh_config.snippet  cubby が書く ssh_config の例（macOS・Windows）
+host/bootstrap-root.sh  root が要るホストの準備（cubby add-host が必要なときだけ sudo で実行する）
 bin/ctr-connect         ProxyCommand から呼ばれる本体（ホスト側）
 bin/ctr-list            コンテナ・ボリューム・worktree の一覧（ホスト側）
 bin/ctr-remove          片付け（ホスト側）
@@ -56,12 +61,27 @@ tests/smoke.sh          CLI で確かめられる受け入れテスト（手元�
 
 ## 必要なもの
 
-**リモートホスト（各台）**: Linux、rootless で使える Podman（`/etc/subuid`・`/etc/subgid` にログインユーザーの行があること）、git 2.17 以降、flock（util-linux）、ssh-keygen、tar。元リポジトリをログインユーザー所有で clone しておきます。
+**リモートホスト（各台）**: Linux。`ssh <ホスト>` でログインでき、そのユーザーが sudo を使えること。**これ以外の準備は要りません**。足りないものは `cubby add-host` が入れます。
 
-- **linger を有効にしてください**（`sudo loginctl enable-linger <ユーザー>`）。無効だと SSH が切れたときにコンテナと Claude Code 本体が止まり、Desktop で前のセッションに戻れません。`cubby add-host` は有効化を試み、できなければ警告を出します。
-- worktree の置き場（既定 `/srv/worktrees`）をログインユーザーが作れない場合は、管理者に `sudo install -d -o <ユーザー> /srv/worktrees` を依頼するか、`--worktrees ~/worktrees` のようにホームの下を指定します。
+| 自動で用意するもの | 内容 |
+|---|---|
+| パッケージ | podman, git, flock, ssh-keygen, tar, newuidmap/newgidmap ほか（apt / dnf / yum / zypper / pacman / apk に対応） |
+| rootless の設定 | `/etc/subuid`・`/etc/subgid` の範囲、newuidmap/newgidmap の権限、linger |
+| ディレクトリ | 元リポジトリ・worktree の置き場（なければログインユーザー所有で作る） |
+| 元リポジトリ | `--repo-url` を指定すると clone する（ssh の URL は手元の ssh-agent を転送して認証） |
+| cubby 本体 | 設定、コンテナ用のホスト鍵、公開鍵の登録、スクリプト、コンテナイメージ |
 
-**手元の PC**: OpenSSH クライアント、`sh`（macOS・Linux は標準、Windows は Git Bash）、`tar`、Cloudflare Tunnel を使うなら [cloudflared](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/)。
+root が要る作業は、残っているときだけ sudo で行います（2 回目以降は通常 sudo を使いません）。sudo にパスワードが要る場合は、手元の端末で尋ねます。既存のディレクトリの所有者や中身、既存の設定値は変えません。
+
+**手元の PC（Claude Desktop を動かすマシン）**:
+
+| OS | 必要なもの | cubby の実行方法 |
+|---|---|---|
+| macOS | 標準の OpenSSH・sh・tar。Cloudflare Tunnel を使うなら `brew install cloudflared` | ターミナルで `sh client/cubby ...` |
+| Linux | OpenSSH クライアント・sh・tar。Cloudflare Tunnel を使うなら cloudflared | ターミナルで `sh client/cubby ...` |
+| Windows | Windows 標準の OpenSSH クライアント（設定 > システム > オプション機能 > OpenSSH クライアント）、[Git for Windows](https://git-scm.com/download/win)（cubby の実行に使う）、Cloudflare Tunnel を使うなら [cloudflared](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/) | Git Bash で `sh client/cubby ...`、PowerShell で `.\client\cubby.ps1 ...`、cmd で `client\cubby.cmd ...` |
+
+Windows では、cubby は Git Bash 付属の ssh ではなく **Windows 標準の OpenSSH（`ssh.exe`）**を使います。Claude Desktop・Windows の ssh-agent と同じ設定（`%USERPROFILE%\.ssh\config`）と鍵を使うためです。生成される ProxyCommand も Windows 標準の `ssh.exe` を呼び、sh を必要としません。
 
 **Cloudflare 側**: 各ホストで cloudflared のトンネルが SSH（`ssh://localhost:22`）を公開しており、Access アプリケーションでホスト名（例 `gpu1.example.com`）が設定済みであること。
 
@@ -70,33 +90,43 @@ tests/smoke.sh          CLI で確かめられる受け入れテスト（手元�
 ```sh
 git clone https://github.com/perorin0418/cubby.git && cd cubby
 
-# 1. ホストを登録する（Cloudflare Tunnel 経由の例）
+# Cloudflare Tunnel 経由のホストを登録し、ホストの環境を整える（macOS・Linux・Git Bash）
 sh client/cubby add-host gpu1 \
   --hostname gpu1.example.com --user alice --cloudflared \
-  --repo /srv/project
+  --repo /srv/project --repo-url git@github.com:example/project.git
+```
+
+```powershell
+# Windows の PowerShell から
+.\client\cubby.ps1 add-host gpu1 --hostname gpu1.example.com --user alice --cloudflared --repo /srv/project --repo-url git@github.com:example/project.git
 ```
 
 `add-host` は次をまとめて行います（何度実行しても同じ結果になります）。
 
-1. `~/.ssh/cubby/gpu1.conf` を書き、`~/.ssh/config` の先頭に `Include cubby/*.conf` を足す（元のファイルは `config.cubby.bak` に保存）
+1. `~/.ssh/config` の先頭に、このホスト用の管理ブロック（`# >>> cubby gpu1 ... >>>` 〜 `# <<< cubby gpu1 <<<`）を書く。元のファイルは `config.cubby.bak` に保存します。`Include` は使わないので、`Include` を解釈しない SSH クライアントでも読めます
 2. `ssh gpu1` が通るか確かめる。Cloudflare Access の初回はブラウザでのログインを求められます
-3. ホストにスクリプトを転送し、`host/setup-host.sh` を実行する
-   - コンテナ用の公開鍵の登録（既定は `~/.ssh/id_ed25519.pub` など。`--key` で指定可）
-   - コンテナ用のホスト鍵の生成、worktree の置き場の作成、スクリプトの設置
-   - コンテナイメージのビルド（初回は数分かかります）、linger の有効化
-4. コンテナのホスト鍵を `~/.ssh/known_hosts` に `cubby-gpu1` として登録する。ホストへの認証済みの SSH で受け取るので、初回接続時の確認は出ません
+3. root が要る準備が残っていれば sudo で行う（上の表）
+4. ホストにスクリプトを転送し、元リポジトリの clone、公開鍵の登録（既定は `~/.ssh/id_ed25519.pub` など。`--key` で指定可）、ホスト鍵の生成、イメージのビルド（初回は数分）、rootless コンテナの動作確認を行う
+5. コンテナのホスト鍵を `~/.ssh/known_hosts` に `cubby-gpu1` として登録する。ホストへの認証済みの SSH で受け取るので、初回接続時の確認は出ません
 
-ホストへのログイン自体（`ssh gpu1`）に必要な鍵の登録は、事前に済ませておいてください。既に `~/.ssh/config` にホストの設定があるなら、`--hostname` などの代わりに `--ssh-host <その名前>` を指定します。
+ProxyCommand には `ssh` と `cloudflared` の**絶対パス**を書きます。GUI から起動した Claude Desktop（特に macOS）は PATH が最小限で、Homebrew などで入れたコマンドが見つからないためです。cloudflared を後から入れた・移した場合は `add-host` を再実行してください。
+
+既に `~/.ssh/config` にホストの設定があるなら、`--hostname` などの代わりに `--ssh-host <その名前>` を指定します。
 
 ```sh
-# 既存の ~/.ssh/config の Host gpu2 を使う例
 sh client/cubby add-host gpu2 --ssh-host gpu2 --worktrees /home/alice/worktrees
 ```
 
-最後に、Desktop からはパスフレーズを入力できないので、鍵を ssh-agent に登録しておきます。
+最後に、Desktop からはパスフレーズを入力できないので、鍵を ssh-agent に登録します。
+
+| OS | 方法 |
+|---|---|
+| macOS | `ssh-add --apple-use-keychain ~/.ssh/id_ed25519`。`~/.ssh/config` の `Host *` に `UseKeychain yes` と `AddKeysToAgent yes` を書くと再起動後も使えます |
+| Linux | デスクトップ環境の ssh-agent（GNOME Keyring など）に `ssh-add ~/.ssh/id_ed25519` |
+| Windows | 管理者の PowerShell で `Get-Service ssh-agent \| Set-Service -StartupType Automatic; Start-Service ssh-agent`、その後 `ssh-add $env:USERPROFILE\.ssh\id_ed25519` |
 
 ```sh
-ssh ctr-test.gpu1 hostname   # → ctr-test と返れば完了
+ssh ctr-test.gpu1 hostname   # → ctr-test と返れば完了（Windows は PowerShell でも同じ）
 ```
 
 ## 日常の使い方
@@ -121,7 +151,7 @@ ctr-remove --force ctr-feature1  # 未コミットの変更があっても workt
 
 コンテナ → worktree → ホームのボリュームの順で消します。**未コミットの変更があると、何も消さずに止まります**。ブランチは消しません。
 
-手元の登録だけを消すには `sh client/cubby remove-host gpu1`（`~/.ssh/cubby/gpu1.conf` と known_hosts の `cubby-gpu1` を消します。ホスト上のものは残ります）。
+手元の登録だけを消すには `sh client/cubby remove-host gpu1`（`~/.ssh/config` の cubby ブロックと known_hosts の `cubby-gpu1` を消します。ホスト上のものは残ります）。
 
 ## テスト
 
@@ -155,7 +185,7 @@ Desktop での確認（セッションがコンテナ内で動く・再起動後
 - コンテナのポートは公開しません。
 - 秘密鍵・認証情報・`config.env` の実値はコミットしないでください。
 - Desktop は Anthropic の認証情報をコンテナ内に置きます。コンテナを他人と共有しないでください。
-- Windows 版 Desktop は内蔵の SSH クライアントを使うため、`Include`・`Host ctr-*.<id>` のパターン・ProxyCommand（cloudflared を含む 2 段）を解釈するかは未検証です。解釈されない場合は、[client/ssh_config.snippet](client/ssh_config.snippet) を参考に `~/.ssh/config` へ直接、名前ごとに書いてください。
+- **Windows 版 Desktop について**: Windows 標準の OpenSSH（9.5）では、生成した設定（パターン `Host ctr-*.<id>`・ProxyCommand・%n）が sh なしで動くことを確認済みです。一方、Desktop が内蔵の SSH クライアントを使う場合に同じ設定を解釈するかは未検証です。パターンが解釈されない場合は、[client/ssh_config.snippet](client/ssh_config.snippet) を参考に接続名ごとに `Host ctr-feature1.gpu1` と書き分けてください。
 - 各ホストのブランチ名は `ctr-<作業名>` です。複数のホストで同じ上流リポジトリへ push する場合は、作業名が重ならないようにしてください。
 
 ## 設計からの変更点（docs/handoff-ctr-connect.md との違い）
@@ -169,3 +199,6 @@ Desktop での確認（セッションがコンテナ内で動く・再起動後
 | ホストへは直接 SSH | Cloudflare Tunnel（`cloudflared access ssh`）を ProxyCommand に設定できる | 利用者の環境に合わせた |
 | — | ロック中に起動するコマンドで fd 9 を閉じる | rootless Podman の conmon・fuse-overlayfs がロックの fd を受け継ぎ、ロックを持ち続けたため（検証で判明） |
 | — | linger を有効化する | rootless では、無効だとログアウト時にコンテナが止まるため |
+| ホストの事前準備（docker・git の導入、ディレクトリ作成）は手作業 | `cubby add-host` が必要なときだけ sudo で自動実行（`host/bootstrap-root.sh`） | 利用者の要望 |
+| `docker run --init` | イメージに tini を入れて PID 1 にする | ホストの catatonit の有無に依存しないため |
+| 手元は macOS・Linux の OpenSSH 前提、`~/.ssh/config` に手で追記 | Windows・macOS・Linux に対応。`~/.ssh/config` の先頭に管理ブロックを書く（`Include` は使わない）。ProxyCommand は絶対パス。Windows は Windows 標準の OpenSSH を使う | 利用者の要望。GUI から起動した Desktop の PATH が最小限のため |

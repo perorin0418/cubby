@@ -1,18 +1,34 @@
 # 参考: `cubby add-host gpu1 --hostname gpu1.example.com --user alice --cloudflared` が
-# ~/.ssh/cubby/gpu1.conf に書く内容。通常は手で書く必要はない。
-# （~/.ssh/config の先頭には `Include cubby/*.conf` が足される）
-# Include を使えない SSH クライアントでは、これを ~/.ssh/config の「Host *」より上に直接書く。
-
-# コンテナ: ssh ctr-<作業名>.gpu1
+# ~/.ssh/config の先頭に書く管理ブロック。通常は手で書く必要はない（再実行すると置き換わる）。
+# コマンドは絶対パスで書かれる（GUI から起動した Claude Desktop は PATH が最小限のため）。
+#
+# macOS（Homebrew の cloudflared）の例:
+# >>> cubby gpu1 ssh-host=gpu1 >>>
 Host ctr-*.gpu1
   User dev
-  ProxyCommand ssh gpu1 .local/bin/ctr-connect %n
+  ProxyCommand /usr/bin/ssh gpu1 .local/bin/ctr-connect %n
   HostKeyAlias cubby-gpu1
   ServerAliveInterval 30
-
-# リモートホスト本体（Cloudflare Tunnel 経由）
 Host gpu1
   HostName gpu1.example.com
   User alice
-  ProxyCommand cloudflared access ssh --hostname %h
+  ProxyCommand /opt/homebrew/bin/cloudflared access ssh --hostname %h
   ServerAliveInterval 30
+# <<< cubby gpu1 <<<
+
+# Windows の例（Windows 標準の OpenSSH を使う。空白を含むパスは二重引用符で囲まれる）:
+# >>> cubby gpu1 ssh-host=gpu1 >>>
+# Host ctr-*.gpu1
+#   User dev
+#   ProxyCommand C:/WINDOWS/System32/OpenSSH/ssh.exe gpu1 .local/bin/ctr-connect %n
+#   HostKeyAlias cubby-gpu1
+#   ServerAliveInterval 30
+# Host gpu1
+#   HostName gpu1.example.com
+#   User alice
+#   ProxyCommand "C:/Program Files (x86)/cloudflared/cloudflared.exe" access ssh --hostname %h
+#   ServerAliveInterval 30
+# <<< cubby gpu1 <<<
+#
+# パターン（Host ctr-*.gpu1）を解釈できない SSH クライアントでは、接続名ごとに
+# 「Host ctr-feature1.gpu1」のように書き分ける（中身は同じ）。
