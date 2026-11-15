@@ -113,7 +113,7 @@ sh client/cubby add-host lab1 --hostname lab1.example.com --user alice --cloudfl
 1. `~/.ssh/config` の先頭に、このホスト用の管理ブロック（`# >>> cubby lab1 ... >>>` 〜 `# <<< cubby lab1 <<<`）を書く。元のファイルは `config.cubby.bak` に保存します。`Include` は使わないので、`Include` を解釈しない SSH クライアントでも読めます
 2. `ssh lab1` に鍵で入れるか確かめる。入れなければログインのパスワードを 1 回尋ねて公開鍵を登録する。Cloudflare Access の初回はブラウザでのログインを求められます。ホスト自体のホスト鍵は初回に自動で受け入れます（以後、変わっていれば止まります）
 3. root が要る準備が残っていれば sudo で行う（上の表）
-4. ホストにスクリプトを転送し、公開鍵の登録（既定は `~/.ssh/id_ed25519.pub` など。`--key` で指定可）、ホスト鍵の生成、イメージのビルド（初回は数分）、rootless コンテナの動作確認、GPU の判定を行う
+4. ホストにスクリプトを転送し、公開鍵の登録（既定は `~/.ssh/id_ed25519.pub` など。`--key` で指定可。手元に鍵がなければ `~/.ssh/id_ed25519` を作る）、ホスト鍵の生成、イメージのビルド（初回は数分）、rootless コンテナの動作確認、GPU の判定を行う
 5. コンテナのホスト鍵を `~/.ssh/known_hosts` に `cubby-lab1` として登録する。ホストへの認証済みの SSH で受け取るので、初回接続時の確認は出ません
 
 ProxyCommand には `ssh` と `cloudflared` の**絶対パス**を書きます。GUI から起動した Claude Desktop（特に macOS）は PATH が最小限で、Homebrew などで入れたコマンドが見つからないためです。cloudflared を後から入れた・移した場合は `add-host` を再実行してください。
@@ -124,7 +124,9 @@ ProxyCommand には `ssh` と `cloudflared` の**絶対パス**を書きます�
 sh client/cubby add-host lab2 --ssh-host lab2 --work-root /data/cubby-work
 ```
 
-最後に、Desktop からはパスフレーズを入力できないので、鍵を ssh-agent に登録します。
+**手元の鍵について**: 既定の名前（`~/.ssh/id_ed25519` など）の鍵も ssh-agent の鍵もなければ、`add-host` が `~/.ssh/id_ed25519` をパスフレーズなしで作ります（Desktop は接続の途中でパスフレーズを入力できないため）。別の名前の鍵を使うなら `--identity` で指定します。パスフレーズなしの鍵は ssh-agent への登録は不要です。
+
+パスフレーズ付きの鍵を使う場合は、Desktop からはパスフレーズを入力できないので、鍵を ssh-agent に登録します。
 
 | OS | 方法 |
 |---|---|
@@ -287,7 +289,7 @@ macOS・Linux・Git Bash は `sh client/cubby ...`、Windows の PowerShell は 
 | `--cloudflared` | なし | Cloudflare Tunnel 経由で接続する（`ProxyCommand cloudflared access ssh --hostname %h`。`--hostname` と一緒に使う） |
 | `--identity FILE` | ssh の既定 | ホストとコンテナへのログインに使う秘密鍵。公開鍵の登録には `FILE.pub` を使う（`--key` を省略したらコンテナにもこれを登録する）。鍵の名前が `id_ed25519` などの既定と違うときに指定する。`~/.ssh/...`・`C:\Users\...` どちらの書き方でもよい |
 | `--ssh-host ALIAS` | `<id>` | ホストの SSH 名。`--hostname` を使わず、`~/.ssh/config` に自分で書いた既存の設定を使うときに指定する |
-| `--key FILE` | `~/.ssh/id_ed25519.pub` → `id_ecdsa.pub` → `id_rsa.pub` → ssh-agent の鍵 | コンテナ（とホスト）に登録する公開鍵 |
+| `--key FILE` | `~/.ssh/id_ed25519.pub` → `id_ecdsa.pub` → `id_rsa.pub` → ssh-agent の鍵 → どれもなければ `~/.ssh/id_ed25519` を作る | コンテナ（とホスト）に登録する公開鍵 |
 | `--work-root PATH` | `~/cubby/work` | ホスト上の作業ディレクトリの置き場。各コンテナの作業ディレクトリは `<置き場>/<名前>`。初回のみ有効（既存の設定は変えない） |
 | `--mount SPEC` | なし | そのホストの全コンテナに毎回マウントするディレクトリを足す。複数指定可。`SPEC` は `ホストのパス[:コンテナ内のパス][:ro\|rw]`（省略時は同じパス・`rw`） |
 | `--unmount PATH` | なし | そのホストのパスのマウントをやめる。複数指定可 |
@@ -370,7 +372,7 @@ sh tests/smoke.sh <id> [--cleanup]
 
 | 症状 | 確認すること |
 |---|---|
-| `no SSH key found` | 鍵の名前が既定（`id_ed25519` など）と違う。表示された候補を `--identity` で指定する。鍵がなければ `ssh-keygen -t ed25519` で作る |
+| `no SSH key found; creating ...` | 手元に既定の名前（`id_ed25519` など）の鍵がないので、`~/.ssh/id_ed25519`（パスフレーズなし）を作った。別の名前の既存の鍵を使いたいなら、表示された `--identity ...` を付けて再実行する |
 | `unknown option` | オプションの綴り（近い名前があれば `did you mean` で表示する） |
 | `cannot ssh to <host>` | `ssh <host>` が単体で通るか。ホスト名・ネットワーク、cloudflared のログイン（ブラウザ） |
 | `could not log in ... with the password` | ログインのパスワード。ホストの sshd がパスワード認証を許可しているか |

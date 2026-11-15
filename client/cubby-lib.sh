@@ -27,6 +27,8 @@ if [ "$CUBBY_OS" = windows ]; then
   if [ -n "$win_ssh_dir" ]; then
     SSH_BIN="$win_ssh_dir/ssh.exe"
     SSH_ADD_BIN="$win_ssh_dir/ssh-add.exe"
+    # 鍵の作成も Windows 標準の OpenSSH で行う（秘密鍵ファイルのアクセス権を Windows の ssh が受け付ける形にするため）
+    SSH_KEYGEN_BIN="$win_ssh_dir/ssh-keygen.exe"
   else
     printf 'cubby: ERROR: %s\n' "Windows OpenSSH client not found. Enable it: Settings > System > Optional features > OpenSSH Client" >&2
     exit 1
@@ -35,6 +37,7 @@ if [ "$CUBBY_OS" = windows ]; then
 else
   SSH_BIN=$(command -v ssh) || { printf 'cubby: ERROR: ssh not found\n' >&2; exit 1; }
   SSH_ADD_BIN=$(command -v ssh-add || echo ssh-add)
+  SSH_KEYGEN_BIN=$(command -v ssh-keygen || echo ssh-keygen)
   default_ssh_dir="$HOME/.ssh"
 fi
 

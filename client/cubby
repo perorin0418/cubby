@@ -143,17 +143,25 @@ find_pubkeys() {
   if "$SSH_ADD_BIN" -L 2>/dev/null | grep -q '^ssh-\|^ecdsa-\|^sk-'; then
     "$SSH_ADD_BIN" -L | tr -d '\r'; return
   fi
-  # 既定の名前の鍵がない: ~/.ssh にある鍵の候補と、指定のしかたを案内する
-  log "ERROR: no SSH key found (looked for ~/.ssh/id_ed25519.pub, id_ecdsa.pub, id_rsa.pub and keys in ssh-agent)"
-  found=0
+  # 既定の名前の鍵がない: ~/.ssh/id_ed25519 を作る。
+  # 秘密鍵だけがあれば、公開鍵を作り直す（既存の秘密鍵は上書きしない）。
+  k="$default_ssh_dir/id_ed25519"
+  mkdir -p "$default_ssh_dir"
+  if [ -e "$k" ]; then
+    log "creating $(natpath "$k").pub from the existing private key"
+    "$SSH_KEYGEN_BIN" -y -f "$(natpath "$k")" > "$k.pub" \
+      || die "could not read $(natpath "$k") (has a passphrase? then pass --identity, or add it to ssh-agent)"
+    cat "$k.pub"; return
+  fi
   for p in "$default_ssh_dir"/*.pub; do
     [ -r "$p" ] && [ -r "${p%.pub}" ] || continue
-    [ "$found" = 1 ] || log "keys found in $(natpath "$default_ssh_dir"); use one with --identity:"
-    found=1
-    log "  --identity $(natpath "${p%.pub}")"
+    log "note: you also have $(natpath "${p%.pub}"); to use it instead, rerun with --identity $(natpath "${p%.pub}")"
   done
-  [ "$found" = 1 ] || log "create one with: ssh-keygen -t ed25519   (then rerun add-host)"
-  exit 1
+  # パスフレーズなし: Claude Desktop は接続の途中でパスフレーズを入力できないため
+  log "no SSH key found; creating $(natpath "$k") (ed25519, no passphrase, for Claude Desktop)"
+  "$SSH_KEYGEN_BIN" -q -t ed25519 -N '' -C "cubby@$(hostname 2>/dev/null || echo client)" -f "$(natpath "$k")" </dev/null \
+    || die "ssh-keygen failed; create a key yourself (ssh-keygen -t ed25519) and rerun"
+  cat "$k.pub"
 }
 
 # パスの指定を整える: 先頭の ~ を展開し、Windows では C:\... や C:/... を Git Bash の形にする
