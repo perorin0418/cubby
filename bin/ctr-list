@@ -19,6 +19,8 @@ fi
 . "$(dirname "$0")/ctr-common.sh"
 
 echo "== host: ${CTR_HOST_ID:-$(hostname)}  gpu: ${CTR_GPU_AVAILABLE}${CTR_GPU_INFO:+ ($CTR_GPU_INFO)}  docker in containers: $([ -n "${CTR_PODMAN_SOCKET:-}" ] && [ "${CTR_HOST_PODMAN:-yes}" != no ] && echo yes || echo no) =="
+base=$(podman image inspect -f '{{index .Labels "cubby.base-image"}}' "${CTR_IMAGE:-localhost/ctr-dev:latest}" 2>/dev/null || true)
+echo "== container OS (image base): ${base:-unknown}"
 if [ -r "$CONF_DIR/auto-update.env" ]; then
   # shellcheck disable=SC1091
   au=$(. "$CONF_DIR/auto-update.env"; printf '%s (%s) every %s' "$CTR_AUTO_URL" "${CTR_AUTO_BRANCH:-main}" "${CTR_AUTO_INTERVAL:-15min}")
@@ -45,7 +47,7 @@ for c in $(podman ps -a --filter label=ctr.managed=true --format '{{.Names}}'); 
 done
 if [ -n "$outdated" ]; then
   echo "  containers created with older mount settings:$outdated"
-  echo "  (apply with: ctr-recreate <name>)"
+  echo "  (recreated automatically on the next connect when nobody is connected, or now with: ctr-recreate <name>)"
 fi
 oldimg=
 for c in $(podman ps -a --filter label=ctr.managed=true --format '{{.Names}}'); do
@@ -54,7 +56,7 @@ done
 if [ -n "$oldimg" ]; then
   echo
   echo "== containers still using an older image:$oldimg"
-  echo "   (the image was rebuilt; apply with: ctr-recreate <name>)"
+  echo "   (the image was rebuilt; recreated automatically on the next connect when nobody is connected, or now with: ctr-recreate <name>)"
 fi
 echo
 echo "== work directories ($WORK_ROOT) =="

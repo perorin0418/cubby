@@ -176,6 +176,51 @@ EOF
                   || ng "M1 extra mounts"
 fi
 
+# O. コンテナの OS がホストの OS に合っている（Debian・Ubuntu・Fedora のホスト。ほかは Debian になる）
+hos=$(remote '. /etc/os-release; echo "$ID $VERSION_ID"' | tr -d '\r')
+cos=$(cssh '. /etc/os-release; echo "$ID $VERSION_ID"' 2>/dev/null | tr -d '\r')
+case "${hos%% *}" in
+  debian|ubuntu|fedora) want=$hos ;;
+  *) want= ;;
+esac
+if [ -z "$want" ]; then
+  sk "O1 host OS '$hos' has no matching base image; container OS is '$cos'"
+elif [ "$cos" = "$want" ]; then
+  ok "O1 container OS matches the host ($cos)"
+else
+  ng "O1 container OS '$cos' differs from the host '$hos'"
+fi
+
+# R. 古くなったコンテナは、誰もつないでいない接続のときに自動で作り直される
+#    （マウントの設定を一時的に変えて古くし、最後に元に戻す）
+MF='${XDG_CONFIG_HOME:-$HOME/.config}/cubby/mounts'
+created() { remote "podman container inspect -f '{{.Created}}' $NAME" | tr -d '\r'; }
+# 1 本目の接続を開いておき、その間にコンテナを古くする（マウントの設定を変える）
+rssh -o BatchMode=yes "$CONN" 'sleep 25' </dev/null >/dev/null 2>&1 &
+bg=$!
+sleep 6
+remote "touch $MF; cp $MF $MF.smoke-bak; echo '/tmp:/ctr-smoke-tmp:ro' >> $MF"
+c1=$(created)
+# 2 本目でつなぐ → 1 本目がつないでいるので作り直さない
+r_busy=$(cssh "test -e /ctr-smoke-tmp && echo mounted || echo not-mounted" 2>/dev/null | tr -d '\r')
+c2=$(created)
+wait "$bg" 2>/dev/null
+sleep 2
+# 誰もつないでいない → 接続のときに作り直す
+r_idle=$(cssh "test -e /ctr-smoke-tmp && echo mounted || echo not-mounted" 2>/dev/null | tr -d '\r')
+c3=$(created)
+remote "mv -f $MF.smoke-bak $MF"
+if [ "$c1" = "$c2" ] && [ "$r_busy" = not-mounted ]; then
+  ok "R1 an outdated container is not recreated while someone is connected"
+else
+  ng "R1 busy: created $c1 -> $c2, mount $r_busy"
+fi
+if [ "$c3" != "$c2" ] && [ "$r_idle" = mounted ] && cssh "test -f ~/.ctr-smoke-marker" >/dev/null 2>&1; then
+  ok "R2 an outdated container is recreated on connect when nobody is connected (home kept)"
+else
+  ng "R2 idle: created $c2 -> $c3, mount $r_idle"
+fi
+
 # 12a. ctr-remove: 作業ディレクトリが空でなければ止まり、中の git の未コミットの変更を知らせる
 cssh "echo b > '$WORK/demo/b.txt'" >/dev/null 2>&1
 out=$(remote "$RBIN/ctr-remove -y $NAME" 2>&1); rc=$?

@@ -166,19 +166,21 @@ cubby はリポジトリを管理しません。各コンテナには空の作�
 
 各コンテナには、次のものが入っています（イメージをビルドした時点の版。amd64・arm64 に対応）。
 
+**コンテナの OS はホストに合わせます**（Fedora 45 のホストなら Fedora 45、Debian 12 なら Debian 12、Ubuntu 24.04 なら Ubuntu 24.04、RHEL 系なら AlmaLinux/Rocky の同じ版、それ以外は Debian）。コンテナはホストのカーネルを共有するので、Claude などがカーネル名から OS を推測しても食い違わないようにするためです。OS のパッケージは `sudo apt-get install`（Debian・Ubuntu）か `sudo dnf install`（Fedora・RHEL 系）で入れます。ベースイメージを固定したいときは、ホストの `config.env` に `CTR_BASE_IMAGE=...` と書きます。
+
 | 種類 | ツール | 入れ方・版 |
 |---|---|---|
 | Go | `go`・`gofmt` | go.dev の公式バイナリ（最新の安定版）。`go install` したものは `~/go/bin` |
 | Java | `java`・`javac` ほか（`JAVA_HOME=/opt/java`） | Eclipse Temurin 21（LTS） |
 | Node.js | `node`・`npm`・`npx` | nodejs.org の公式バイナリ（最新の LTS） |
-| Python | `python3`・`pip3`・`venv` | Debian 12 の Python 3.11。パッケージは `python3 -m venv` の中で入れる（Debian はシステムへの `pip install` を止めている） |
-| JSON / YAML | `jq`・`yq` | jq は Debian、yq は mikefarah/yq の公式バイナリ |
+| Python | `python3`・`pip3`・`venv` | コンテナの OS の Python（Debian 12 は 3.11、Fedora 45 は 3.15 など）。パッケージは `python3 -m venv` の中で入れる |
+| JSON / YAML | `jq`・`yq` | jq は OS のパッケージ、yq は mikefarah/yq の公式バイナリ |
 | Kubernetes | `kubectl`・`helm` | 公式バイナリ（最新） |
 | AWS | `aws` | AWS CLI v2 |
-| コンテナ | `docker`・`docker compose`・`docker buildx` | Docker の公式リポジトリの CLI（デーモンは入れない。「コンテナの中から別のコンテナを起動する」を参照） |
-| その他 | `git`・`curl`・`sudo`・`unzip`・`xz`・`less`・`ps` など | Debian |
+| コンテナ | `docker`・`docker compose`・`docker buildx` | Docker の公式の静的バイナリ（デーモンは入れない。「コンテナの中から別のコンテナを起動する」を参照） |
+| その他 | `git`・`curl`・`sudo`・`unzip`・`xz`・`less`・`ps`・`hostname` など | OS のパッケージ |
 
-- 版を新しくしたいときは、`cubby update <id> --rebuild` でイメージを作り直し、コンテナを `ctr-recreate` で作り直します。
+- 版を新しくしたいときは、`cubby update <id> --rebuild` でイメージを作り直します。
 - ほかに必要なものは `image/Dockerfile` に追記して push します（「コンテナイメージのカスタマイズ」を参照）。そのコンテナだけで使うなら `sudo apt-get install ...` でも入れられます（作り直すと消えます）。
 - イメージは約 2.4 GB で、ホストでの初回のビルドには数分かかります。
 
@@ -268,7 +270,7 @@ ctr-recreate ctr-feature1
 ```
 
 - 自動更新と `cubby update` は `image/` の中身（Dockerfile など）のハッシュをイメージのラベル（`cubby.image-hash`）と比べ、**変わっていれば自動で作り直します**。変わっていなければ作り直しません（`--rebuild` で強制できます）。
-- 作り直しても、既存のコンテナは古いイメージのままです（セッションが切れるので自動では作り直しません）。古いイメージのコンテナは `update` の出力・`ctr-list`（`cubby list`）・接続時のメッセージで知らせるので、`ctr-recreate <名前>` で作り直してください。ホームと作業ディレクトリは残ります。
+- **古いイメージのコンテナは、次に接続したとき、誰もそのコンテナにつないでいなければ自動で作り直されます**（ホームと作業ディレクトリは残ります。中で続いていた Claude Code の処理は終わります）。誰かがつないでいる間は作り直さず、後の接続のときに作り直します。すぐに作り直すならホストで `ctr-recreate <名前>`、自動で作り直したくなければ `config.env` に `CTR_AUTO_RECREATE=no`。マウントの設定の変更・docker 用ソケットの有無の変化も同じ扱いです。
 - Dockerfile に `USER` 行やユーザーの作成は書かないでください（起動時にホストのユーザーを登録する `ctr-entrypoint` と食い違います）。
 - ベースイメージ（`debian:bookworm-slim`）は、ホストにキャッシュされたものを使います。Debian の更新を取り込みたいときは、ホストで `podman pull docker.io/library/debian:bookworm-slim` してから `cubby update <id> --rebuild` を実行します。
 - 作り直すと古いイメージは名前のない状態（`<none>`）でホストに残ります。古いイメージのコンテナを作り直した後なら、ホストで `podman image prune` で消せます（cubby は自動では消しません）。
@@ -436,6 +438,8 @@ sh tests/smoke.sh <id> [--cleanup]
 | `CTR_IMAGE` | `localhost/ctr-dev:latest` | コンテナイメージ |
 | `CTR_GPU_ARGS` | `--device nvidia.com/gpu=all` | `gpu-` のコンテナに付ける podman の引数（例 AMD は `--device /dev/kfd --device /dev/dri --group-add keep-groups`） |
 | `CTR_SUDO` | `yes` | `no` にするとコンテナ内の sudo を許可しない |
+| `CTR_AUTO_RECREATE` | `yes` | `no` にすると、古くなったコンテナを接続時に自動で作り直さない（`ctr-recreate` で手動） |
+| `CTR_BASE_IMAGE` | ホストの OS に合わせて選ぶ | コンテナのベースイメージを固定する（例 `docker.io/library/debian:12-slim`） |
 | `CTR_HOST_PODMAN` | `yes` | `no` にするとホストの Podman の API ソケットをコンテナに渡さない（コンテナ内の docker が使えなくなる） |
 | `CTR_MOUNTS_FILE` | `~/.config/cubby/mounts` | 追加マウントの設定ファイル |
 | `CTR_HOSTKEYS` | `~/.config/cubby/hostkeys` | コンテナ用のホスト鍵の置き場 |
@@ -523,6 +527,8 @@ sh tests/smoke.sh <id> [--cleanup]
 | マウントは repo の `.git`・worktree・ホーム・鍵のみ | ホストごとの `~/.config/cubby/mounts` で任意のディレクトリを全コンテナにマウント。`cubby add-host --mount/--unmount`、反映は `ctr-recreate` | 利用者の要望 |
 | — | `~/.ssh/config` の書き換えを mkdir のロックで排他し、別のファイルに書いてから置き換える | 複数の `add-host` を同時に動かすと、互いのブロックを上書きしたり、書き換え中のファイルを ssh が読んで失敗したりしたため（検証で判明） |
 | コンテナ内に `dev` ユーザーを作り（UID/GID をホストに合わせてイメージをビルド）、`dev` でログイン | ユーザーは作らない。起動時にホストのログインユーザー（同じ名前・UID・GID・ホームのパス）をコンテナの `/etc/passwd` に登録し、その名前でログインする。イメージはホストに依存しない（版のラベルで古いイメージを自動で作り直す） | 権限の食い違いを避けるため（利用者の要望） |
+| ベースイメージは Debian 固定 | ホストの OS と同じディストリビューション・版をベースにする（Dockerfile は 1 つで apt / dnf を切り替える） | Claude がホストのカーネル名から OS を誤認するため（利用者の要望） |
+| 古いコンテナの作り直しは手作業（`ctr-recreate`） | 接続時に、誰もつないでいなければ自動で作り直す（認証済みの SSH セッションの有無で判断） | 利用者の要望 |
 | 開発ツールなし（sshd・git・curl のみ） | Go・Java 21・Node.js LTS・Python・jq・yq・kubectl・helm・AWS CLI を入れる | 利用者の要望 |
 | コンテナからコンテナは起動できない | ホストの Podman の API ソケットを `/var/run/docker.sock` に渡し、docker CLI で兄弟のコンテナを起動できる（入れ子ではない） | 利用者の要望。入れ子より速く、イメージのキャッシュを共有でき、作業ディレクトリのパスが一致するため |
 | コンテナ内で sudo は使えない | ホストのユーザーにパスワードなしの sudo を許可（`CTR_SUDO=no` で無効） | 利用者の要望。コンテナ内の root はホストの root ではないため |

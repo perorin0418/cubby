@@ -263,26 +263,64 @@ if [ -e "$CONF_DIR/.needs-migrate" ]; then
   log "ran podman system migrate"
 fi
 
-# イメージ。利用者のユーザーはイメージに含めない（起動時にホストのユーザーを登録する）ので、
-# ホストに依存しない。image/ の中身（Dockerfile など）のハッシュをラベル cubby.image-hash に
-# 記録し、中身が変わっていれば自動で作り直す（--rebuild なら常に作り直す）。
+# イメージ。利用者のユーザーはイメージに含めない（起動時にホストのユーザーを登録する）。
+# ベースイメージはホストの OS に合わせる（Claude などがカーネル名から OS を推測しても食い違わないように）。
+# image/ の中身（Dockerfile など）とベースイメージのハッシュをラベル cubby.image-hash に記録し、
+# どちらかが変わっていれば自動で作り直す（--rebuild なら常に作り直す）。
+pick_base() {
+  # shellcheck disable=SC1091
+  ( . /etc/os-release 2>/dev/null
+    major=${VERSION_ID%%.*}
+    case "${ID:-}" in
+      debian)  if [ -n "${VERSION_ID:-}" ]; then echo "docker.io/library/debian:${VERSION_ID}-slim"; else echo "docker.io/library/debian:testing-slim"; fi ;;
+      ubuntu)  echo "docker.io/library/ubuntu:${VERSION_ID}" ;;
+      fedora)  echo "registry.fedoraproject.org/fedora:${VERSION_ID}" ;;
+      rocky)   echo "docker.io/rockylinux/rockylinux:${major}" ;;
+      almalinux|rhel|centos|ol) echo "docker.io/library/almalinux:${major}" ;;
+      *) case " ${ID_LIKE:-} " in
+           *" debian "*|*" ubuntu "*) echo "docker.io/library/debian:stable-slim" ;;
+           *" fedora "*|*" rhel "*|*" centos "*) echo "docker.io/library/almalinux:${major:-9}" ;;
+           *) echo "docker.io/library/debian:stable-slim" ;;
+         esac ;;
+    esac )
+}
+# 同じ系統の最新版（ホストの版のイメージが取得できないとき）
+fallback_base() {
+  case "$1" in
+    *fedoraproject.org/fedora:*) echo "registry.fedoraproject.org/fedora:latest" ;;
+    *ubuntu:*)                   echo "docker.io/library/ubuntu:latest" ;;
+    *almalinux:*|*rockylinux*)   echo "docker.io/library/almalinux:latest" ;;
+    *)                           echo "docker.io/library/debian:stable-slim" ;;
+  esac
+}
+BASE_IMAGE=${CTR_BASE_IMAGE:-$(pick_base)}
+if ! podman image exists "$BASE_IMAGE" && ! podman pull -q "$BASE_IMAGE" >/dev/null 2>&1; then
+  fb=$(fallback_base "$BASE_IMAGE")
+  warn "could not pull base image $BASE_IMAGE; using $fb"
+  BASE_IMAGE=$fb
+  podman image exists "$BASE_IMAGE" || podman pull -q "$BASE_IMAGE" >/dev/null 2>&1 \
+    || { BASE_IMAGE=docker.io/library/debian:stable-slim; warn "falling back to $BASE_IMAGE"; }
+fi
 # Windows のエディタで保存して改行が CRLF になっていると RUN 行が壊れるので、LF に揃えてからビルドする
 find "$here/image" -type f -exec sed -i 's/\r$//' {} + 2>/dev/null || true
-img_hash=$(cd "$here/image" && find . -type f | LC_ALL=C sort | while IFS= read -r f; do
-             printf '%s  ' "$f"; sha256sum < "$f" | cut -d' ' -f1
-           done | sha256sum | cut -c1-16)
+img_hash=$( { printf 'base %s\n' "$BASE_IMAGE"
+              cd "$here/image" && find . -type f | LC_ALL=C sort | while IFS= read -r f; do
+                printf '%s  ' "$f"; sha256sum < "$f" | cut -d' ' -f1
+              done; } | sha256sum | cut -c1-16)
 have_hash=$(podman image inspect -f '{{index .Labels "cubby.image-hash"}}' "$IMAGE" 2>/dev/null || true)
 case "$have_hash" in '<no value>') have_hash= ;; esac
 if [ "$rebuild" = 1 ] || [ "$have_hash" != "$img_hash" ]; then
   if [ "$rebuild" = 1 ]; then
-    log "rebuilding image $IMAGE (--rebuild) ..."
+    log "rebuilding image $IMAGE on $BASE_IMAGE (--rebuild) ..."
   elif [ -n "$have_hash" ] || podman image exists "$IMAGE"; then
-    log "image/ (Dockerfile etc.) changed since $IMAGE was built; rebuilding ..."
+    log "image/ or the base image changed since $IMAGE was built; rebuilding on $BASE_IMAGE ..."
   else
-    log "building image $IMAGE ..."
+    log "building image $IMAGE on $BASE_IMAGE ..."
   fi
-  podman build -q --label cubby.image-hash="$img_hash" -t "$IMAGE" "$here/image" >&2
-  log "built $IMAGE (image/ hash $img_hash)"
+  podman build -q --build-arg BASE_IMAGE="$BASE_IMAGE" \
+    --label cubby.image-hash="$img_hash" --label cubby.base-image="$BASE_IMAGE" \
+    -t "$IMAGE" "$here/image" >&2
+  log "built $IMAGE (base $BASE_IMAGE, hash $img_hash)"
 fi
 
 # rootless でコンテナが動き、ホストのユーザーが同じ名前・UID・ホームで使えるか（ctr-connect と同じ指定で）
@@ -358,13 +396,13 @@ outdated=
 for c in $(podman ps -a --filter label=ctr.managed=true --format '{{.Names}}' 2>/dev/null); do
   [ "$(ctr_container_sig "$c")" = "$sig" ] || outdated="$outdated $c"
 done
-[ -z "$outdated" ] || warn "containers created with older mount settings:$outdated (apply with: ctr-recreate <name>)"
+[ -z "$outdated" ] || warn "containers created with older mount settings:$outdated (recreated automatically on the next connect when nobody is connected, or now with: ctr-recreate <name>)"
 # イメージを作り直したのに、古いイメージのままのコンテナを知らせる
 oldimg=
 for c in $(podman ps -a --filter label=ctr.managed=true --format '{{.Names}}' 2>/dev/null); do
   ctr_image_outdated "$c" && oldimg="$oldimg $c"
 done
-[ -z "$oldimg" ] || warn "containers still using an older image:$oldimg (apply with: ctr-recreate <name>)"
+[ -z "$oldimg" ] || warn "containers still using an older image:$oldimg (recreated automatically on the next connect when nobody is connected, or now with: ctr-recreate <name>)"
 
 log "done (host id: ${CTR_HOST_ID:-unset})"
 printf 'CUBBY_USER %s\n' "$(id -un)"

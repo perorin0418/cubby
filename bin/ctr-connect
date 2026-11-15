@@ -103,6 +103,34 @@ docker=no
 if [ "${CTR_HOST_PODMAN:-yes}" != no ] && [ -n "${CTR_PODMAN_SOCKET:-}" ] && [ -S "$CTR_PODMAN_SOCKET" ]; then
   docker=yes
 fi
+
+# 既存のコンテナが古ければ（イメージの作り直し・マウントの設定の変更・ソケットの有無）、
+# 誰もつないでいないときに限り、作り直してから接続する（ホームと作業ディレクトリは残る）。
+# 誰かがつないでいる間は作り直さない（その接続が切れてしまうため）。CTR_AUTO_RECREATE=no で無効。
+if podman container exists "$name" </dev/null 9>&-; then
+  why=
+  ctr_image_outdated "$name" 9>&- && why="${why:+$why, }the image was rebuilt"
+  [ "$(ctr_container_sig "$name" 9>&-)" = "$mount_sig" ] || why="${why:+$why, }mount settings changed"
+  if [ "$docker" = yes ] && [ "$(podman container inspect -f '{{index .Config.Labels "ctr.docker"}}' "$name" </dev/null 2>/dev/null 9>&-)" != yes ]; then
+    why="${why:+$why, }the host podman socket became available"
+  fi
+  if [ -n "$why" ]; then
+    sessions=0
+    if [ "$(podman container inspect -f '{{.State.Running}}' "$name" </dev/null 2>/dev/null 9>&-)" = true ]; then
+      # 認証済みの SSH セッション（プロセス名 "sshd: user@notty"、OpenSSH 9.8 以降は "sshd-session: user@notty"）。
+      # 待ち受けや認証前の接続（[listener]・[accepted]・[net]）は数えない
+      sessions=$(podman exec "$name" sh -c 'ps -eo args= | grep -cE "^sshd(-session)?: [^ ]+@" || true' </dev/null 2>/dev/null 9>&-)
+    fi
+    if [ "${CTR_AUTO_RECREATE:-yes}" = no ]; then
+      log "$name is outdated ($why); run 'ctr-recreate $name' on the host to apply it"
+    elif [ "${sessions:-0}" -gt 0 ]; then
+      log "$name is outdated ($why) but $sessions session(s) are connected; it will be recreated on a later connect when nobody is connected"
+    else
+      log "recreating $name ($why); home and work directory are kept"
+      podman rm -f "$name" </dev/null >/dev/null 9>&-
+    fi
+  fi
+fi
 if ! podman container exists "$name" </dev/null 9>&-; then
   log "creating container $name (gpu: $gpu, docker: $docker)"
   set --
@@ -136,17 +164,7 @@ EOF
     -w "$work" \
     "$IMAGE" </dev/null >/dev/null 9>&-
 else
-  # マウントの設定がコンテナを作ったときと変わっていれば知らせる（作り直しはしない。セッションが切れるため）
-  cur_sig=$(ctr_container_sig "$name" 9>&-)
-  if [ "$cur_sig" != "$mount_sig" ]; then
-    log "mount settings changed since $name was created; run 'ctr-recreate $name' on the host to apply them"
-  fi
-  if ctr_image_outdated "$name" 9>&-; then
-    log "the image was rebuilt since $name was created; run 'ctr-recreate $name' on the host to use it"
-  fi
-  if [ "$docker" = yes ] && [ "$(podman container inspect -f '{{index .Config.Labels "ctr.docker"}}' "$name" </dev/null 2>/dev/null 9>&-)" != yes ]; then
-    log "$name was created without the host podman socket; run 'ctr-recreate $name' on the host to use docker inside it"
-  fi
+  # （古いかどうかは上で調べ、必要なら作り直し済み）
   if [ "$(podman container inspect -f '{{.State.Running}}' "$name" </dev/null 9>&-)" != true ]; then
     log "starting container $name"
     podman start "$name" </dev/null >/dev/null 9>&-
