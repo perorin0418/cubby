@@ -81,8 +81,8 @@ github_slug() {
 
 # 手元の cubby に、ホストが取得できない変更（未コミット・未 push）があれば知らせる
 warn_unpushed() {
-  dirty=$(git -C "$here" status --porcelain -- bin host image config.env.example 2>/dev/null | head -n 1)
-  ahead=$(git -C "$here" rev-list --count "origin/$1..HEAD" 2>/dev/null || echo 0)
+  dirty=$(git -C "$(natpath "$here")" status --porcelain -- bin host image config.env.example 2>/dev/null | head -n 1)
+  ahead=$(git -C "$(natpath "$here")" rev-list --count "origin/$1..HEAD" 2>/dev/null || echo 0)
   if [ -n "$dirty" ] || [ "${ahead:-0}" != 0 ]; then
     log "WARNING: this cubby has uncommitted or unpushed changes; hosts with auto-update follow origin/$1, so commit and push them"
   fi
@@ -477,7 +477,7 @@ add_host_rest() {
     args="$args --no-auto-update"
   else
     au_url=$auto_url
-    [ -n "$au_url" ] || au_url=$(git -C "$here" remote get-url origin 2>/dev/null || true)
+    [ -n "$au_url" ] || au_url=$(git -C "$(natpath "$here")" remote get-url origin 2>/dev/null || true)
     if [ -z "$au_url" ]; then
       log "auto-update: skipped (this cubby directory has no git remote 'origin'; pass --auto-update-url URL)"
     else
@@ -490,7 +490,7 @@ add_host_rest() {
           au_url="git@github.com:$au_slug.git"
         fi
       fi
-      au_branch=${auto_branch:-$(git -C "$here" rev-parse --abbrev-ref HEAD 2>/dev/null || echo main)}
+      au_branch=${auto_branch:-$(git -C "$(natpath "$here")" rev-parse --abbrev-ref HEAD 2>/dev/null || echo main)}
       [ "$au_branch" != HEAD ] || au_branch=main
       no_quote auto-update-url "$au_url"; no_quote auto-update-branch "$au_branch"
       args="$args --auto-update $au_url --auto-update-branch $au_branch"
