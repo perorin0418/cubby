@@ -1,8 +1,18 @@
-# 手元の ~/.ssh/config の「Host *」より上に追記する。
-# remote-host はリモートホストの SSH 名に、/usr/local/bin はスクリプトの設置先に置き換える。
-# 手元の OpenSSH が ProxyCommand で %n を受け付けなければ %h を使う（HostName を書かないので同じ値）。
-Host ctr-*
+# 参考: `cubby add-host gpu1 --hostname gpu1.example.com --user alice --cloudflared` が
+# ~/.ssh/cubby/gpu1.conf に書く内容。通常は手で書く必要はない。
+# （~/.ssh/config の先頭には `Include cubby/*.conf` が足される）
+# Include を使えない SSH クライアントでは、これを ~/.ssh/config の「Host *」より上に直接書く。
+
+# コンテナ: ssh ctr-<作業名>.gpu1
+Host ctr-*.gpu1
   User dev
-  ProxyCommand ssh remote-host /usr/local/bin/ctr-connect %n
-  HostKeyAlias dev-containers
+  ProxyCommand ssh gpu1 .local/bin/ctr-connect %n
+  HostKeyAlias cubby-gpu1
+  ServerAliveInterval 30
+
+# リモートホスト本体（Cloudflare Tunnel 経由）
+Host gpu1
+  HostName gpu1.example.com
+  User alice
+  ProxyCommand cloudflared access ssh --hostname %h
   ServerAliveInterval 30

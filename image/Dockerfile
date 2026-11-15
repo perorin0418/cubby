@@ -1,8 +1,8 @@
-FROM debian:bookworm-slim
+FROM docker.io/library/debian:bookworm-slim
 
-# dev の UID/GID は元リポジトリ（CTR_REPO）の所有者に合わせる。
-#   docker build --build-arg DEV_UID=$(stat -c %u /srv/project/.git) \
-#                --build-arg DEV_GID=$(stat -c %g /srv/project/.git) -t ctr-dev:latest image/
+# dev の UID/GID はリモートホストのログインユーザーと同じにする（rootless Podman の
+# --userns=keep-id で対応づけるため）。通常は host/setup-host.sh が自動でビルドする。
+#   podman build --build-arg DEV_UID=$(id -u) --build-arg DEV_GID=$(id -g) -t localhost/ctr-dev:latest image/
 ARG DEV_UID=1000
 ARG DEV_GID=1000
 

@@ -1,67 +1,61 @@
 #!/bin/sh
-# tests/smoke.sh [--cleanup]
+# tests/smoke.sh <host-id> [--cleanup]
 #
 # 受け入れテストのうち CLI で確かめられる項目（1〜6, 11, 12）を、手元の PC から実行する。
 #
-# 前提:
-#   - リモートホストで host/setup-host.sh を実行済み、イメージをビルド済み
-#   - 手元の鍵が ssh-agent に登録済み（BatchMode で接続する）
-#   - コンテナのホスト鍵 dev-containers を known_hosts に登録済み
-#     （初回だけ手で `ssh ctr-test true` などを実行して受け入れておく）
+# 前提: `client/cubby add-host <host-id> ...` を実行済み（ssh_config・鍵・イメージが揃っている）。
 #
-# テスト用の名前（既定 ctr-smoke）のコンテナ・worktree・ボリューム・ブランチを作る。
+# テスト用の名前（既定 ctr-smoke）のコンテナ・worktree・ボリューム・ブランチをホストに作る。
 # 片付け（テスト 12 の後半＝実際の削除）は --cleanup を付けたときだけ行う。ブランチは消さない。
 #
 # 環境変数:
-#   CTR_REMOTE       リモートホストの SSH 名            （既定 remote-host）
-#   CTR_REMOTE_BIN   リモートのスクリプト設置先         （既定 /usr/local/bin）
-#   CTR_REPO         リモートの元リポジトリ             （既定 /srv/project）
-#   CTR_WT_ROOT      リモートの worktree の置き場       （既定 /srv/worktrees）
-#   CTR_SMOKE_NAME   テスト用の接続名                   （既定 ctr-smoke）
-#   CTR_SSH_OPTS     コンテナへの ssh に足すオプション
-#   CTR_REMOTE_EXEC  リモートでシェル文字列を実行するコマンド（既定: ssh "$CTR_REMOTE"）
-#   CTR_PROXY        ProxyCommand（既定: ssh $CTR_REMOTE $CTR_REMOTE_BIN/ctr-connect %n）
+#   CTR_REPO         ホストの元リポジトリ             （既定 /srv/project）
+#   CTR_WT_ROOT      ホストの worktree の置き場       （既定 /srv/worktrees）
+#   CTR_SMOKE_NAME   テスト用の名前                   （既定 ctr-smoke）
+#   CUBBY_SSH_DIR    cubby と同じく ~/.ssh 以外を使うとき
 set -u
 
+ID=${1:-}
+[ -n "$ID" ] || { echo "usage: $0 <host-id> [--cleanup]" >&2; exit 2; }
 cleanup=0
-[ "${1:-}" = --cleanup ] && cleanup=1
+[ "${2:-}" = --cleanup ] && cleanup=1
 
-REMOTE=${CTR_REMOTE:-remote-host}
-RBIN=${CTR_REMOTE_BIN:-/usr/local/bin}
+SSH_DIR=${CUBBY_SSH_DIR:-$HOME/.ssh}
+CONF="$SSH_DIR/cubby/$ID.conf"
+[ -r "$CONF" ] || { echo "$CONF not found; run: client/cubby add-host $ID ..." >&2; exit 2; }
+REMOTE=$(sed -n 's/^# cubby-ssh-host: //p' "$CONF" | head -n 1)
+SSHF=
+[ "$SSH_DIR" = "$HOME/.ssh" ] || SSHF="-F $SSH_DIR/config"
+RBIN=.local/bin
 REPO=${CTR_REPO:-/srv/project}
 WT_ROOT=${CTR_WT_ROOT:-/srv/worktrees}
 NAME=${CTR_SMOKE_NAME:-ctr-smoke}
-PROXY=${CTR_PROXY:-ssh $REMOTE $RBIN/ctr-connect %n}
+CONN="$NAME.$ID"
 WT="$WT_ROOT/$NAME"
 
 pass=0; fail=0; skip=0
-ok()   { pass=$((pass + 1)); printf 'PASS  %s\n' "$*"; }
-ng()   { fail=$((fail + 1)); printf 'FAIL  %s\n' "$*"; }
-sk()   { skip=$((skip + 1)); printf 'SKIP  %s\n' "$*"; }
-info() { printf '      %s\n' "$*"; }
+ok()   { pass=$((pass + 1)); printf 'PASS  %s
+' "$*"; }
+ng()   { fail=$((fail + 1)); printf 'FAIL  %s
+' "$*"; }
+sk()   { skip=$((skip + 1)); printf 'SKIP  %s
+' "$*"; }
+info() { printf '      %s
+' "$*"; }
 
 # リモートホストでシェル文字列を実行する
-remote() {
-  if [ -n "${CTR_REMOTE_EXEC:-}" ]; then
-    # shellcheck disable=SC2086
-    $CTR_REMOTE_EXEC "$1"
-  else
-    ssh -o BatchMode=yes "$REMOTE" "$1"
-  fi
-}
+# shellcheck disable=SC2086
+remote() { ssh $SSHF -o BatchMode=yes "$REMOTE" "$1" </dev/null; }
 
 # コンテナに SSH で入ってシェル文字列を実行する
-cssh() {
-  # shellcheck disable=SC2086
-  ssh -o BatchMode=yes -o User=dev -o "ProxyCommand=$PROXY" \
-      -o HostKeyAlias=dev-containers ${CTR_SSH_OPTS:-} "$NAME" "$1"
-}
+# shellcheck disable=SC2086
+cssh() { ssh $SSHF -o BatchMode=yes "$CONN" "$1" </dev/null; }
 
 count_containers() {
-  remote "docker ps -aq --filter label=ctr.name=$NAME | wc -l" | tr -d ' \r'
+  remote "podman ps -aq --filter label=ctr.name=$NAME | wc -l" | tr -d ' '
 }
 
-echo "== smoke test: $NAME via $REMOTE =="
+echo "== smoke test: $CONN via $REMOTE =="
 
 # 前提: テスト用の名前がまだ使われていないこと（テスト 3 を新規作成で確かめるため）
 pre=$(count_containers)
@@ -72,14 +66,14 @@ fi
 
 # 1. 不正な名前を拒否する（終了コード 2）
 t1=ok
-for bad in "'bad name'" "ctr-UPPER" "'ctr-a
+for bad in "'bad name'" "ctr-UPPER" "ctr-x.other-host" "ctr-x.a.b" "'ctr-a
 b'" "x-foo" "ctr-" "ctr--x" "ctr-a/b" "ctr-$(printf 'a%.0s' $(seq 1 41))"; do
   remote "$RBIN/ctr-connect $bad </dev/null >/dev/null 2>&1; echo \$?" > /tmp/ctr-smoke.$$ 2>&1
   rc=$(tr -d '\r' < /tmp/ctr-smoke.$$)
   [ "$rc" = 2 ] || { t1=ng; info "name $bad -> exit $rc"; }
 done
 rm -f /tmp/ctr-smoke.$$
-[ "$t1" = ok ] && ok "1 invalid names are rejected with exit 2" || ng "1 invalid names are rejected with exit 2"
+[ "$t1" = ok ] && ok "1 invalid names / wrong host id are rejected with exit 2" || ng "1 invalid names / wrong host id are rejected with exit 2"
 
 # 3. 同名の同時接続でコンテナが 1 つ（新規作成の競合）
 remote "for i in 1 2; do (timeout 30 $RBIN/ctr-connect $NAME </dev/null 2>/dev/null | head -c 8 >/dev/null) & done; wait" >/dev/null 2>&1
@@ -105,7 +99,7 @@ n=$(count_containers)
 
 # 4. CLI で接続でき、ホスト名が接続名になる
 h=$(cssh hostname 2>/dev/null | tr -d '\r')
-[ "$h" = "$NAME" ] && ok "4 ssh $NAME hostname -> $h" || ng "4 ssh $NAME hostname -> $h"
+[ "$h" = "$NAME" ] && ok "4 ssh $CONN hostname -> $h" || ng "4 ssh $CONN hostname -> $h"
 
 # 5. worktree で commit でき、ホストから見える
 msg="ctr-smoke $(date +%s)"
@@ -147,11 +141,11 @@ fi
 
 # 11. コンテナを作り直しても接続でき、ホームが残る
 cssh 'echo keep > ~/.ctr-smoke-marker' >/dev/null 2>&1
-remote "docker rm -f $NAME >/dev/null"
+remote "podman rm -f $NAME >/dev/null"
 if [ "$(cssh 'cat ~/.ctr-smoke-marker' 2>/dev/null | tr -d '\r')" = keep ]; then
-  ok "11 reconnect after docker rm -f works and home is kept"
+  ok "11 reconnect after podman rm -f works and home is kept"
 else
-  ng "11 reconnect after docker rm -f (home marker missing or connect failed)"
+  ng "11 reconnect after podman rm -f (home marker missing or connect failed)"
 fi
 
 # 12. ctr-remove: 未コミットがあれば止まる
@@ -170,7 +164,7 @@ if [ "$cleanup" = 1 ]; then
   if remote "$RBIN/ctr-remove -y $NAME" >/dev/null 2>&1 \
      && [ "$(count_containers)" = 0 ] \
      && ! remote "test -e '$WT'" \
-     && ! remote "docker volume inspect $NAME-home >/dev/null 2>&1"; then
+     && ! remote "podman volume exists $NAME-home"; then
     ok "12b ctr-remove removes container, worktree and volume (branch $NAME kept)"
   else
     ng "12b ctr-remove did not clean up completely"

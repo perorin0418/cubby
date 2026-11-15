@@ -1,5 +1,5 @@
 #!/bin/sh
-# ctr-remove [-y] [--force] <name>
+# ctr-remove [-y] [--force] <name>[.<host-id>]
 #
 # 接続名 <name> のコンテナ・worktree・ホームのボリュームを片付ける。ブランチは消さない。
 #   -y       確認を省略する
@@ -8,9 +8,10 @@
 # 未コミットの変更がある場合は、何も消す前に止まって内容を表示する。
 set -eu
 
-if [ -r /etc/ctr/config.env ]; then
-  # shellcheck disable=SC1091
-  . /etc/ctr/config.env
+CONF=${CTR_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/cubby/config.env}
+if [ -r "$CONF" ]; then
+  # shellcheck disable=SC1090
+  . "$CONF"
 fi
 REPO=${CTR_REPO:-/srv/project}
 WT_ROOT=${CTR_WT_ROOT:-/srv/worktrees}
@@ -29,6 +30,8 @@ for arg in "$@"; do
     *)        [ -z "$name" ] || usage; name=$arg ;;
   esac
 done
+# 接続名の .<ホストID> は取り除く（ctr-feature1.gpu1 → ctr-feature1）
+name=${name%%.*}
 
 case "$name" in
   ''|*[!a-z0-9-]*) log "invalid name: $name"; exit 2 ;;
@@ -40,8 +43,8 @@ esac
 wt="$WT_ROOT/$name"
 vol="$name-home"
 
-has_container=0; docker inspect --type container "$name" >/dev/null 2>&1 && has_container=1
-has_volume=0;    docker volume inspect "$vol" >/dev/null 2>&1 && has_volume=1
+has_container=0; podman container exists "$name" >/dev/null 2>&1 && has_container=1
+has_volume=0;    podman volume exists "$vol" >/dev/null 2>&1 && has_volume=1
 has_wt=0;        [ -e "$wt" ] && has_wt=1
 
 if [ "$has_container$has_volume$has_wt" = 000 ]; then
@@ -78,7 +81,7 @@ fi
 
 # 2. コンテナ
 if [ "$has_container" = 1 ]; then
-  docker rm -f "$name" >/dev/null
+  podman rm -f "$name" >/dev/null
   log "removed container $name"
 fi
 
@@ -99,7 +102,7 @@ fi
 
 # 4. ホームのボリューム
 if [ "$has_volume" = 1 ]; then
-  docker volume rm "$vol" >/dev/null
+  podman volume rm "$vol" >/dev/null
   log "removed volume $vol"
 fi
 

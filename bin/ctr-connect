@@ -1,57 +1,89 @@
 #!/bin/sh
-# ctr-connect <name>
+# ctr-connect <name>[.<host-id>]
 #
-# ~/.ssh/config の ProxyCommand から呼ばれる。接続名 <name> のコンテナと worktree を
-# 用意し（なければ作る・止まっていれば起動する）、コンテナ内の sshd と標準入出力をつなぐ。
+# ~/.ssh/config の ProxyCommand から呼ばれる。接続名のコンテナと worktree を用意し
+# （なければ作る・止まっていれば起動する）、コンテナ内の sshd と標準入出力をつなぐ。
+# rootless Podman で動かす（sudo 不要）。
 #
-# 重要: 標準出力は SSH の通信路そのもの。ログ・git・docker の出力は必ず標準エラー出力へ出す。
+# 接続名は ctr-<作業名>.<ホストID>。ドット以降はホストの選択に使うだけで、コンテナ名・
+# ブランチ名・worktree 名には ctr-<作業名> を使う。config.env の CTR_HOST_ID が設定されて
+# いれば、ホストID が一致しない接続は拒否する（接続先の取り違え防止）。
+#
+# 重要: 標準出力は SSH の通信路そのもの。ログ・git・podman の出力は必ず標準エラー出力へ出す。
 #       また、準備中のコマンドが SSH の入力を読み取らないよう、標準入力は /dev/null にする。
 set -eu
 
-if [ -r /etc/ctr/config.env ]; then
-  # shellcheck disable=SC1091
-  . /etc/ctr/config.env
+CONF=${CTR_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/cubby/config.env}
+if [ -r "$CONF" ]; then
+  # shellcheck disable=SC1090
+  . "$CONF"
 fi
+CONF_DIR=$(dirname "$CONF")
 REPO=${CTR_REPO:-/srv/project}
 WT_ROOT=${CTR_WT_ROOT:-/srv/worktrees}
-IMAGE=${CTR_IMAGE:-ctr-dev:latest}
-HOSTKEYS=${CTR_HOSTKEYS:-/etc/ctr/hostkeys}
-AUTHKEYS=${CTR_AUTHKEYS:-/etc/ctr/authorized_keys}
-LOCK_DIR=${CTR_LOCK_DIR:-/tmp/ctr-locks}
+IMAGE=${CTR_IMAGE:-localhost/ctr-dev:latest}
+HOSTKEYS=${CTR_HOSTKEYS:-$CONF_DIR/hostkeys}
+AUTHKEYS=${CTR_AUTHKEYS:-$CONF_DIR/authorized_keys}
+LOCK_DIR=${CTR_LOCK_DIR:-${XDG_RUNTIME_DIR:-/tmp/cubby-$(id -u)}/cubby-locks}
+HOST_ID=${CTR_HOST_ID:-}
 
 log() { printf 'ctr-connect: %s\n' "$*" >&2; }
 
 # 名前の検証は case で行う（grep は改行を含む入力を行ごとに判定するため、すり抜ける）。
-# 改行は [a-z0-9-] に含まれないので 1 つ目のパターンで弾かれる。
-name=${1:-}
+# 改行やドットは [a-z0-9-] に含まれないので弾かれる。
+full=${1:-}
+name=${full%%.*}
+suffix=
+[ "$name" = "$full" ] || suffix=${full#*.}
 case "$name" in
-  ''|*[!a-z0-9-]*) log "invalid name: $name"; exit 2 ;;
+  ''|*[!a-z0-9-]*) log "invalid name: $full"; exit 2 ;;
   ctr-[a-z0-9]*)   ;;
-  *)               log "invalid name: $name"; exit 2 ;;
+  *)               log "invalid name: $full"; exit 2 ;;
 esac
 [ "${#name}" -le 44 ] || { log "name too long: $name"; exit 2; }
+if [ "$name" != "$full" ]; then
+  case "$suffix" in
+    ''|*[!a-z0-9-]*) log "invalid host id: $full"; exit 2 ;;
+  esac
+  if [ -n "$HOST_ID" ] && [ "$suffix" != "$HOST_ID" ]; then
+    log "host id mismatch: $suffix (this host is $HOST_ID)"; exit 2
+  fi
+fi
 
 wt="$WT_ROOT/$name"
 
 # 同名の同時接続でコンテナや worktree が二重に作られないよう、名前ごとに排他する。
+# ロック中に起動するコマンドには必ず 9>&- を付ける。rootless Podman は conmon や
+# fuse-overlayfs などの常駐プロセスを起動し、それらがロックの fd を受け継いで
+# コンテナが動いている間ずっとロックを持ち続けてしまう。
 mkdir -p "$LOCK_DIR"
 exec 9>"$LOCK_DIR/$name.lock"
 flock -w 60 9 || { log "lock timeout: $name"; exit 1; }
 
 if [ ! -d "$wt" ]; then
-  if git -C "$REPO" show-ref --verify --quiet "refs/heads/$name" </dev/null; then
+  if git -C "$REPO" show-ref --verify --quiet "refs/heads/$name" </dev/null 9>&-; then
     log "creating worktree $wt (existing branch $name)"
-    git -C "$REPO" worktree add "$wt" "$name" </dev/null 1>&2
+    git -C "$REPO" worktree add "$wt" "$name" </dev/null 1>&2 9>&-
   else
     log "creating worktree $wt (new branch $name)"
-    git -C "$REPO" worktree add -b "$name" "$wt" </dev/null 1>&2
+    git -C "$REPO" worktree add -b "$name" "$wt" </dev/null 1>&2 9>&-
   fi
 fi
 
-if ! docker inspect --type container "$name" </dev/null >/dev/null 2>&1; then
+# --userns=keep-id : ホストのログインユーザーをコンテナ内の同じ UID（= dev）に対応づける。
+#                    worktree や .git の所有者がホストと一致し、書き込みや git の所有者チェックが通る。
+# --user root      : keep-id は既定の実行ユーザーをログインユーザーにするので、sshd 用に root に戻す
+#                    （root といっても rootless のユーザー名前空間の中の root）。
+# label=disable    : SELinux のホストで、マウント元を再ラベルせずに読み書きできるようにする。
+# --uts/--network private : containers.conf でホストの名前空間が既定にされていても、
+#                    ホスト名を設定でき、sshd :22 がホストの sshd と衝突しないようにする。
+if ! podman container exists "$name" </dev/null 9>&-; then
   log "creating container $name"
-  docker run -d --name "$name" --hostname "$name" \
+  podman run -d --name "$name" --hostname "$name" \
     --label ctr.managed=true --label ctr.name="$name" \
+    --uts=private --network=private \
+    --userns=keep-id --user root \
+    --security-opt label=disable \
     --init --restart unless-stopped \
     -v "$name-home:/home/dev" \
     -v "$REPO/.git:$REPO/.git" \
@@ -59,15 +91,15 @@ if ! docker inspect --type container "$name" </dev/null >/dev/null 2>&1; then
     -v "$HOSTKEYS:/etc/ssh/ctr-hostkeys:ro" \
     -v "$AUTHKEYS:/etc/ssh/ctr-authorized_keys:ro" \
     -w "$wt" \
-    "$IMAGE" </dev/null >/dev/null
-elif [ "$(docker inspect --type container -f '{{.State.Running}}' "$name" </dev/null)" != true ]; then
+    "$IMAGE" </dev/null >/dev/null 9>&-
+elif [ "$(podman container inspect -f '{{.State.Running}}' "$name" </dev/null 9>&-)" != true ]; then
   log "starting container $name"
-  docker start "$name" </dev/null >/dev/null
+  podman start "$name" </dev/null >/dev/null 9>&-
 fi
 
 # コンテナ内の sshd が応答するまで最大 15 秒（0.25 秒 x 60 回）待つ。
 i=0
-until docker exec "$name" nc -z 127.0.0.1 22 </dev/null >/dev/null 2>&1; do
+until podman exec "$name" nc -z 127.0.0.1 22 </dev/null >/dev/null 2>&1 9>&-; do
   i=$((i + 1))
   [ "$i" -ge 60 ] && { log "sshd not ready: $name"; exit 1; }
   sleep 0.25
@@ -75,4 +107,4 @@ done
 
 # ロックを閉じてから繋ぐ。閉じ忘れるとセッション中ずっとロックを持ち、同名の 2 本目が待たされる。
 exec 9>&-
-exec docker exec -i "$name" nc 127.0.0.1 22
+exec podman exec -i "$name" nc 127.0.0.1 22

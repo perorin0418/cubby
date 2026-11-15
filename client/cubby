@@ -1,0 +1,255 @@
+#!/bin/sh
+# cubby : 手元の PC から、リモートホスト（複数可）を登録・管理する。
+#
+#   cubby add-host <id> [options]   リモートホストを登録する（何度実行してもよい）
+#       --hostname FQDN     ホストの実際の名前。指定すると ssh_config にホストの設定も書く
+#       --user USER         ホストのログインユーザー（--hostname と一緒に使う）
+#       --port N            ホストの SSH ポート（--hostname と一緒に使う）
+#       --cloudflared       Cloudflare Tunnel 経由で接続する
+#                           （ProxyCommand cloudflared access ssh --hostname %h）
+#       --identity FILE     ホストへのログインに使う秘密鍵（--hostname と一緒に使う）
+#       --ssh-host ALIAS    ホストの SSH 名。--hostname を使わず、既存の ~/.ssh/config の
+#                           設定を使うときに指定する（既定は <id>）
+#       --key FILE          コンテナに登録する公開鍵（既定: ~/.ssh/id_ed25519.pub など）
+#       --repo PATH         ホストの元リポジトリ（既定 /srv/project）
+#       --worktrees PATH    ホストの worktree の置き場（既定 /srv/worktrees）
+#       --rebuild           コンテナイメージを作り直す
+#       --replace-hostkey   known_hosts の既存のホスト鍵と違っても置き換える
+#   cubby hosts                     登録済みのホストを一覧する
+#   cubby list [id...]              各ホストのコンテナ・worktree を一覧する（既定: 全ホスト）
+#   cubby preflight <id>            ホストの事前確認（何も変更しない）
+#   cubby remove-host [-y] <id>     手元の登録だけを消す（ホスト上のものは消さない）
+#
+# add-host がすること:
+#   1. ~/.ssh/cubby/<id>.conf を書き、~/.ssh/config の先頭に Include を足す
+#   2. ホストにスクリプトを転送し、host/setup-host.sh を実行する
+#      （公開鍵の登録・ホスト鍵の生成・イメージのビルド・linger の有効化）
+#   3. コンテナのホスト鍵を ~/.ssh/known_hosts に cubby-<id> として登録する
+#      （認証済みのホストへの SSH で受け取るので、初回の確認は不要）
+#
+# 接続名は ctr-<作業名>.<id>（例 ctr-feature1.gpu1）。
+set -eu
+
+here=$(cd "$(dirname "$0")/.." && pwd)
+SSH_DIR=${CUBBY_SSH_DIR:-$HOME/.ssh}
+CONF_D="$SSH_DIR/cubby"
+SSH_CONFIG="$SSH_DIR/config"
+KNOWN_HOSTS="$SSH_DIR/known_hosts"
+REMOTE_SHARE='.local/share/cubby'
+REMOTE_BIN='.local/bin'
+
+log()  { printf 'cubby: %s\n' "$*" >&2; }
+die()  { printf 'cubby: ERROR: %s\n' "$*" >&2; exit 1; }
+usage() { sed -n '2,30p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2; }
+
+# ~/.ssh 以外を使うとき（テストなど）は ssh に -F を付ける
+custom_dir=0
+[ "$SSH_DIR" = "$HOME/.ssh" ] || custom_dir=1
+rssh() {
+  if [ "$custom_dir" = 1 ]; then ssh -F "$SSH_CONFIG" "$@"; else ssh "$@"; fi
+}
+
+valid_id() {
+  case "$1" in ''|*[!a-z0-9-]*|-*) return 1 ;; esac
+  [ "${#1}" -le 32 ]
+}
+no_quote() {
+  case "$2" in *"'"*|*'"'*|*' '*) die "$1 must not contain quotes or spaces: $2" ;; esac
+}
+
+# conf ファイルの中の「# cubby-ssh-host: <alias>」を読む
+alias_of() {
+  f="$CONF_D/$1.conf"
+  [ -r "$f" ] || die "host '$1' is not registered (cubby add-host $1 ...)"
+  sed -n 's/^# cubby-ssh-host: //p' "$f" | head -n 1
+}
+
+ensure_include() {
+  mkdir -p "$CONF_D"
+  chmod 700 "$SSH_DIR" "$CONF_D" 2>/dev/null || true
+  if [ "$custom_dir" = 1 ]; then inc="Include $CONF_D/*.conf"; else inc='Include cubby/*.conf'; fi
+  touch "$SSH_CONFIG"
+  if ! grep -qxF "$inc" "$SSH_CONFIG"; then
+    cp "$SSH_CONFIG" "$SSH_CONFIG.cubby.bak"
+    { printf '%s\n\n' "$inc"; cat "$SSH_CONFIG.cubby.bak"; } > "$SSH_CONFIG"
+    chmod 600 "$SSH_CONFIG"
+    log "added '$inc' to the top of $SSH_CONFIG (backup: $SSH_CONFIG.cubby.bak)"
+  fi
+}
+
+find_pubkeys() {
+  if [ -n "$1" ]; then
+    [ -r "$1" ] || die "cannot read $1"
+    cat "$1"; return
+  fi
+  for k in id_ed25519 id_ecdsa id_rsa; do
+    if [ -r "$HOME/.ssh/$k.pub" ]; then cat "$HOME/.ssh/$k.pub"; return; fi
+  done
+  if ssh-add -L 2>/dev/null | grep -q '^ssh-\|^ecdsa-\|^sk-'; then
+    ssh-add -L; return
+  fi
+  die "no public key found; pass --key FILE"
+}
+
+cmd_add_host() {
+  id=${1:-}; [ $# -gt 0 ] && shift
+  valid_id "$id" || die "invalid id '$id' (lowercase letters, digits and '-', up to 32 chars)"
+  alias_name=$id hostname= user= port= cloudflared=0 identity= key= repo= wt= rebuild=0 replace=0
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --hostname)        hostname=$2; shift 2 ;;
+      --user)            user=$2; shift 2 ;;
+      --port)            port=$2; shift 2 ;;
+      --cloudflared)     cloudflared=1; shift ;;
+      --identity)        identity=$2; shift 2 ;;
+      --ssh-host)        alias_name=$2; shift 2 ;;
+      --key)             key=$2; shift 2 ;;
+      --repo)            repo=$2; shift 2 ;;
+      --worktrees)       wt=$2; shift 2 ;;
+      --rebuild)         rebuild=1; shift ;;
+      --replace-hostkey) replace=1; shift ;;
+      *) die "unknown option: $1" ;;
+    esac
+  done
+  for v in "alias:$alias_name" "hostname:$hostname" "user:$user" "port:$port" \
+           "identity:$identity" "repo:$repo" "worktrees:$wt"; do
+    no_quote "${v%%:*}" "${v#*:}"
+  done
+  if [ -z "$hostname" ] && { [ -n "$user" ] || [ -n "$port" ] || [ -n "$identity" ] || [ "$cloudflared" = 1 ]; }; then
+    die "--user/--port/--identity/--cloudflared need --hostname"
+  fi
+  if [ "$cloudflared" = 1 ] && ! command -v cloudflared >/dev/null 2>&1; then
+    log "WARNING: cloudflared is not in PATH; install it before connecting"
+  fi
+
+  # 1. ssh_config
+  ensure_include
+  if [ "$custom_dir" = 1 ]; then pf="ssh -F $SSH_CONFIG"; else pf=ssh; fi
+  conf="$CONF_D/$id.conf"
+  {
+    echo "# managed by cubby (cubby add-host $id). Edits are overwritten on the next add-host."
+    echo "# cubby-ssh-host: $alias_name"
+    echo
+    echo "# コンテナ: ssh ctr-<作業名>.$id"
+    echo "Host ctr-*.$id"
+    echo "  User dev"
+    echo "  ProxyCommand $pf $alias_name $REMOTE_BIN/ctr-connect %n"
+    echo "  HostKeyAlias cubby-$id"
+    [ "$custom_dir" = 1 ] && echo "  UserKnownHostsFile $KNOWN_HOSTS"
+    [ -n "$identity" ] && echo "  IdentityFile $identity"
+    echo "  ServerAliveInterval 30"
+    if [ -n "$hostname" ]; then
+      echo
+      echo "# リモートホスト本体"
+      echo "Host $alias_name"
+      echo "  HostName $hostname"
+      [ -n "$user" ] && echo "  User $user"
+      [ -n "$port" ] && echo "  Port $port"
+      [ -n "$identity" ] && echo "  IdentityFile $identity"
+      [ "$cloudflared" = 1 ] && echo "  ProxyCommand cloudflared access ssh --hostname %h"
+      echo "  ServerAliveInterval 30"
+    fi
+  } > "$conf.tmp"
+  mv -f "$conf.tmp" "$conf"
+  chmod 600 "$conf"
+  log "wrote $conf"
+
+  # ホストに入れるか（Cloudflare Access の初回はブラウザでのログインを求められる）
+  log "checking ssh $alias_name ..."
+  rssh "$alias_name" true </dev/null \
+    || die "cannot ssh to $alias_name. Make sure 'ssh $alias_name' works (cloudflared login, host key, user key)"
+
+  # 2. スクリプトを転送して setup-host.sh を実行する
+  log "uploading scripts to $alias_name:~/$REMOTE_SHARE"
+  tar -C "$here" -cf - bin host image config.env.example \
+    | rssh "$alias_name" "mkdir -p $REMOTE_SHARE && tar -xf - -C $REMOTE_SHARE"
+
+  tmp=$(mktemp)
+  trap 'rm -f "$tmp" "$tmp.out"' EXIT
+  find_pubkeys "$key" > "$tmp"
+  args="--id $id --pubkeys -"
+  [ -n "$repo" ] && args="$args --repo $repo"
+  [ -n "$wt" ] && args="$args --worktrees $wt"
+  [ "$rebuild" = 1 ] && args="$args --rebuild"
+  log "running setup-host.sh on $alias_name (the first run builds the image; this takes a while)"
+  rssh "$alias_name" "sh $REMOTE_SHARE/host/setup-host.sh $args" < "$tmp" > "$tmp.out" \
+    || die "setup-host.sh failed on $alias_name"
+
+  # 3. known_hosts
+  hostkey=$(sed -n 's/^CUBBY_HOSTKEY //p' "$tmp.out" | tr -d '\r' | head -n 1)
+  case "$hostkey" in ssh-*' '*) ;; *) die "did not receive the container host key from $alias_name" ;; esac
+  touch "$KNOWN_HOSTS"
+  current=$(ssh-keygen -F "cubby-$id" -f "$KNOWN_HOSTS" 2>/dev/null | grep -v '^#' | awk '{print $2" "$3}' || true)
+  if [ -z "$current" ]; then
+    printf 'cubby-%s %s\n' "$id" "$hostkey" >> "$KNOWN_HOSTS"
+    log "registered container host key as cubby-$id in $KNOWN_HOSTS"
+  elif printf '%s\n' "$current" | grep -qxF "$hostkey"; then
+    log "container host key cubby-$id is already registered"
+  elif [ "$replace" = 1 ]; then
+    ssh-keygen -R "cubby-$id" -f "$KNOWN_HOSTS" >/dev/null 2>&1
+    printf 'cubby-%s %s\n' "$id" "$hostkey" >> "$KNOWN_HOSTS"
+    log "replaced container host key cubby-$id in $KNOWN_HOSTS"
+  else
+    die "container host key for cubby-$id changed on $alias_name. If this is expected, rerun with --replace-hostkey"
+  fi
+
+  log "done. try: ssh ctr-test.$id hostname"
+}
+
+cmd_hosts() {
+  found=0
+  for f in "$CONF_D"/*.conf; do
+    [ -e "$f" ] || continue
+    found=1
+    id=$(basename "$f" .conf)
+    printf '%-16s ssh-host=%s  connect as ctr-<name>.%s\n' "$id" "$(alias_of "$id")" "$id"
+  done
+  [ "$found" = 1 ] || echo "(no hosts registered; cubby add-host <id> ...)"
+}
+
+cmd_list() {
+  if [ $# -eq 0 ]; then
+    for f in "$CONF_D"/*.conf; do [ -e "$f" ] && set -- "$@" "$(basename "$f" .conf)"; done
+  fi
+  [ $# -gt 0 ] || { echo "(no hosts registered)"; return; }
+  for id in "$@"; do
+    a=$(alias_of "$id")
+    rssh "$a" "$REMOTE_BIN/ctr-list" </dev/null || log "failed to list $id"
+    echo
+  done
+}
+
+cmd_preflight() {
+  a=$(alias_of "${1:-}")
+  rssh "$a" 'sh -s' < "$here/host/preflight.sh"
+}
+
+cmd_remove_host() {
+  yes=0
+  [ "${1:-}" = -y ] && { yes=1; shift; }
+  id=${1:-}
+  valid_id "$id" || die "invalid id '$id'"
+  conf="$CONF_D/$id.conf"
+  echo "this removes only local registration for $id:"
+  [ -e "$conf" ] && echo "  $conf"
+  echo "  cubby-$id in $KNOWN_HOSTS"
+  echo "containers and worktrees on the host are kept (use ctr-remove there)."
+  if [ "$yes" = 0 ]; then
+    printf 'proceed? [y/N] ' >&2
+    read -r answer || answer=
+    case "$answer" in y|Y|yes|YES) ;; *) log "aborted"; exit 1 ;; esac
+  fi
+  rm -f "$conf"
+  [ -e "$KNOWN_HOSTS" ] && ssh-keygen -R "cubby-$id" -f "$KNOWN_HOSTS" >/dev/null 2>&1 || true
+  log "removed local registration for $id"
+}
+
+sub=${1:-}; [ $# -gt 0 ] && shift
+case "$sub" in
+  add-host)    cmd_add_host "$@" ;;
+  hosts)       cmd_hosts ;;
+  list)        cmd_list "$@" ;;
+  preflight)   cmd_preflight "$@" ;;
+  remove-host) cmd_remove_host "$@" ;;
+  *)           usage ;;
+esac

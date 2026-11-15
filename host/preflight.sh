@@ -1,11 +1,12 @@
 #!/bin/sh
-# host/preflight.sh : フェーズ0（リモートホストの事前確認）。何も変更しない。
-# 出力をそのまま記録として残す。
+# host/preflight.sh : リモートホストの事前確認。何も変更しない。
+# 手元からは: ssh <host> sh -s < host/preflight.sh
 set -u
 
-if [ -r /etc/ctr/config.env ]; then
-  # shellcheck disable=SC1091
-  . /etc/ctr/config.env
+CONF=${CTR_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/cubby/config.env}
+if [ -r "$CONF" ]; then
+  # shellcheck disable=SC1090
+  . "$CONF"
 fi
 REPO=${CTR_REPO:-/srv/project}
 WT_ROOT=${CTR_WT_ROOT:-/srv/worktrees}
@@ -14,28 +15,25 @@ run() { printf '\n$ %s\n' "$*"; "$@" 2>&1 || printf '(exit %s)\n' "$?"; }
 
 run uname -a
 run sh -c '. /etc/os-release 2>/dev/null && echo "$PRETTY_NAME"'
-run docker version
+run podman version
 run git --version
-run sh -c 'command -v flock'
-run sh -c 'command -v ssh-keygen'
 run id
 run stat -c '%U %u %G %g %n' "$REPO" "$REPO/.git"
-run df -h /srv /var/lib/docker
+run df -h "$HOME" "$REPO"
 
 printf '\n== checks ==\n'
-if docker info >/dev/null 2>&1; then
-  echo "OK   docker runs without sudo"
-else
-  echo "NG   docker does not run without sudo (docker group = root equivalent; ask before adding)"
-fi
-if [ -w "$REPO/.git" ]; then echo "OK   $REPO/.git is writable"; else echo "NG   $REPO/.git is not writable"; fi
+chk() { if eval "$2"; then echo "OK   $1"; else echo "NG   $1${3:+ -- $3}"; fi; }
+for c in podman git flock ssh-keygen tar; do
+  chk "$c is installed" "command -v $c >/dev/null 2>&1"
+done
+chk "podman runs rootless" "[ \"\$(podman info --format '{{.Host.Security.Rootless}}' 2>/dev/null)\" = true ]"
+chk "/etc/subuid has $(id -un)" "grep -q '^$(id -un):' /etc/subuid 2>/dev/null" "needed for --userns=keep-id"
+chk "linger is enabled" "[ \"\$(loginctl show-user $(id -un) -p Linger --value 2>/dev/null)\" = yes ]" \
+    "sudo loginctl enable-linger $(id -un)"
+chk "$REPO/.git exists and is writable" "[ -w '$REPO/.git' ]"
+chk "$REPO/.git is owned by $(id -un)" "[ \"\$(stat -c %u '$REPO/.git' 2>/dev/null)\" = $(id -u) ]"
 if [ -d "$WT_ROOT" ]; then
-  if [ -w "$WT_ROOT" ]; then echo "OK   $WT_ROOT is writable"; else echo "NG   $WT_ROOT is not writable"; fi
+  chk "$WT_ROOT is writable" "[ -w '$WT_ROOT' ]"
 else
-  echo "--   $WT_ROOT does not exist yet (setup-host.sh creates it)"
-fi
-if [ "$(stat -c %u "$REPO/.git" 2>/dev/null)" = "$(id -u)" ]; then
-  echo "OK   $REPO/.git is owned by the login user (use DEV_UID=$(id -u) DEV_GID=$(id -g))"
-else
-  echo "!!   $REPO/.git owner differs from login user; build the image with the repo owner's UID/GID"
+  chk "$WT_ROOT can be created" "[ -w \"\$(dirname '$WT_ROOT')\" ]" "sudo install -d -o $(id -un) $WT_ROOT"
 fi

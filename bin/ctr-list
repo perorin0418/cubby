@@ -1,19 +1,21 @@
 #!/bin/sh
-# ctr-list : ctr-connect が管理するコンテナと、元リポジトリの worktree を一覧する。
+# ctr-list : ctr-connect が管理するコンテナ・ボリューム・worktree を一覧する。
 set -eu
 
-if [ -r /etc/ctr/config.env ]; then
-  # shellcheck disable=SC1091
-  . /etc/ctr/config.env
+CONF=${CTR_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/cubby/config.env}
+if [ -r "$CONF" ]; then
+  # shellcheck disable=SC1090
+  . "$CONF"
 fi
 REPO=${CTR_REPO:-/srv/project}
 
+echo "== host: ${CTR_HOST_ID:-$(hostname)} =="
 echo "== containers (label ctr.managed=true) =="
-docker ps -a --filter label=ctr.managed=true \
+podman ps -a --filter label=ctr.managed=true \
   --format 'table {{.Names}}\t{{.Status}}\t{{.Image}}\t{{.CreatedAt}}'
 echo
 echo "== volumes =="
-docker volume ls --format '{{.Name}}' | grep -E '^ctr-[a-z0-9][a-z0-9-]*-home$' || echo "(none)"
+podman volume ls --format '{{.Name}}' | grep -E '^ctr-[a-z0-9][a-z0-9-]*-home$' || echo "(none)"
 echo
 echo "== worktrees ($REPO) =="
 git -C "$REPO" worktree list
