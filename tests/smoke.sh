@@ -104,7 +104,7 @@ n=$(count_containers)
 [ "$n" = 1 ] && ok "2b reconnect does not create another container" || ng "2b containers=$n after reconnect"
 
 # 4. CLI で接続でき、ホスト名が接続名になる
-h=$(cssh hostname 2>&1 | tr -d '\r')
+h=$(cssh hostname 2>/dev/null | tr -d '\r')
 [ "$h" = "$NAME" ] && ok "4 ssh $NAME hostname -> $h" || ng "4 ssh $NAME hostname -> $h"
 
 # 5. worktree で commit でき、ホストから見える

@@ -22,7 +22,7 @@ SUDO=sudo
 [ "$(id -u)" = 0 ] && SUDO=
 
 # 設定ファイル（既存は残す）
-$SUDO mkdir -p /etc/ctr
+$SUDO install -d -m 755 -o root -g root /etc/ctr
 if [ ! -e /etc/ctr/config.env ]; then
   $SUDO install -m 644 -o root -g root "$here/config.env.example" /etc/ctr/config.env
   echo "installed /etc/ctr/config.env (edit it if the defaults do not fit)"
@@ -62,7 +62,7 @@ echo "authorized_keys: $added key(s) added to $ak"
 
 # worktree の置き場
 if [ ! -d "$WT_ROOT" ]; then
-  $SUDO install -d -o "$login_user" "$WT_ROOT"
+  $SUDO install -d -m 755 -o "$login_user" "$WT_ROOT"
   echo "created $WT_ROOT (owner $login_user)"
 fi
 
