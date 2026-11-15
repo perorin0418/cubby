@@ -12,6 +12,8 @@ Claude Desktop の SSH 接続で、**接続名ごとに専用のコンテナ**�
 - **ホスト側の事前準備は不要**です。手元の `cubby add-host` 1 回で、Podman などのインストールから、鍵の登録、イメージのビルドまで済みます。
 - Claude Desktop を動かす手元の PC は **Windows・macOS・Linux** に対応します。複数の PC から同じホストを使えます。
 
+コマンド・オプション・設定の一覧は「[コマンドとオプション一覧](#コマンドとオプション一覧)」にまとめています。
+
 当初の設計は [docs/handoff-ctr-connect.md](docs/handoff-ctr-connect.md) と [docs/claude-desktop-ssh-container.html](docs/claude-desktop-ssh-container.html) にあります（Docker・単一ホスト・git worktree 前提。変更点は末尾の「設計からの変更点」を参照）。
 
 ## しくみ
@@ -258,6 +260,111 @@ sh tests/smoke.sh lab1 --cleanup       # 最後に ctr-remove --force で片付�
 ```
 
 Desktop での確認（セッションがコンテナ内で動く・再起動後に戻る・別名で別コンテナ・同時に動かしても干渉しない）は手作業で行います。手順は [docs/handoff-ctr-connect.md](docs/handoff-ctr-connect.md) の 6.6 を参照してください。
+
+## コマンドとオプション一覧
+
+### 手元の PC: `cubby`
+
+macOS・Linux・Git Bash は `sh client/cubby ...`、Windows の PowerShell は `.\client\cubby.ps1 ...`、cmd は `client\cubby.cmd ...` で実行します（引数はすべて同じ）。
+
+| コマンド | 内容 |
+|---|---|
+| `cubby add-host <id> [オプション]` | リモートホストを登録し、ホストの環境を整える。何度実行してもよい（設定の変更・鍵の追加・イメージの更新にも使う） |
+| `cubby hosts` | 登録済みのホストを一覧する（SSH 名・GPU の有無・接続名の形） |
+| `cubby list [id...]` | 各ホストのコンテナ・ボリューム・追加マウント・作業ディレクトリ（中のリポジトリの状態）を一覧する。省略時は全ホスト |
+| `cubby preflight <id>` | ホストの事前確認（何も変更しない） |
+| `cubby remove-host [-y] <id>` | 手元の登録（`~/.ssh/config` の cubby ブロックと known_hosts の `cubby-<id>`）だけを消す。ホスト上のものは消さない。`-y` で確認を省略 |
+
+`<id>` はホスト ID（英小文字・数字・ハイフン、32 文字以内）。接続名の末尾や ssh_config の名前に使います。
+
+#### `cubby add-host` のオプション
+
+| オプション | 既定 | 内容 |
+|---|---|---|
+| `--hostname FQDN\|IP` | なし | ホストの実際の接続先（DNS 名・IP アドレス・Cloudflare のホスト名）。指定すると ssh_config にホスト本体の設定（`Host <id>`）も書く |
+| `--user USER` | 手元のユーザー名 | ホストのログインユーザー（`--hostname` と一緒に使う）。コンテナにも同じユーザーで入る |
+| `--port N` | 22 | ホストの SSH ポート（`--hostname` と一緒に使う） |
+| `--cloudflared` | なし | Cloudflare Tunnel 経由で接続する（`ProxyCommand cloudflared access ssh --hostname %h`。`--hostname` と一緒に使う） |
+| `--identity FILE` | ssh の既定 | ホストとコンテナへのログインに使う秘密鍵。公開鍵の登録には `FILE.pub` を使う |
+| `--ssh-host ALIAS` | `<id>` | ホストの SSH 名。`--hostname` を使わず、`~/.ssh/config` に自分で書いた既存の設定を使うときに指定する |
+| `--key FILE` | `~/.ssh/id_ed25519.pub` → `id_ecdsa.pub` → `id_rsa.pub` → ssh-agent の鍵 | コンテナ（とホスト）に登録する公開鍵 |
+| `--work-root PATH` | `~/cubby/work` | ホスト上の作業ディレクトリの置き場。各コンテナの作業ディレクトリは `<置き場>/<名前>`。初回のみ有効（既存の設定は変えない） |
+| `--mount SPEC` | なし | そのホストの全コンテナに毎回マウントするディレクトリを足す。複数指定可。`SPEC` は `ホストのパス[:コンテナ内のパス][:ro\|rw]`（省略時は同じパス・`rw`） |
+| `--unmount PATH` | なし | そのホストのパスのマウントをやめる。複数指定可 |
+| `--no-gpu` | GPU を自動判定 | GPU の準備（NVIDIA Container Toolkit の導入・CDI の定義の作成）をしない |
+| `--rebuild` | 必要なときだけ | コンテナイメージを作り直す（イメージの版が古いときは指定しなくても作り直す） |
+| `--replace-hostkey` | なし | コンテナのホスト鍵が known_hosts の記録と違っても置き換える（ホスト側で鍵を作り直したとき） |
+
+- `--mount` / `--unmount` / `--work-root` などで変えた設定を既存のコンテナに反映するには、ホストで `ctr-recreate <名前>` を実行します。
+- 廃止したオプション: `--repo`、`--repo-url`、`--no-repo`、`--worktrees`（指定するとエラーで止まり、代わりの方法を表示します）。
+
+### リモートホスト: `ctr-*`
+
+`ssh <id>` でホストに入ってから実行します（`~/.local/bin` にあります）。
+
+| コマンド | 内容 |
+|---|---|
+| `ctr-list` | このホストのコンテナ・ボリューム・追加マウント（設定が古いコンテナ）・作業ディレクトリ（中のリポジトリのブランチと未コミットの変更の数）を一覧する |
+| `ctr-remove [-y] [--force] <名前>` | コンテナ・作業ディレクトリ・ホームのボリュームを消す。作業ディレクトリが空でなければ、何も消さずに止まる（中のリポジトリの未コミット・未 push も表示）。`-y` で確認を省略、`--force` で中身があっても消す |
+| `ctr-recreate [-y] <名前>` | コンテナだけを作り直す（ホームと作業ディレクトリは残る）。次の接続で今の設定（追加マウント・sudo など）のコンテナが作られる。`-y` で確認を省略 |
+| `ctr-connect <接続名>` | ssh_config の ProxyCommand から呼ばれる本体。手で実行するのは調査のときだけ（例 `ctr-connect ctr-x.lab1 </dev/null \| head -c 8` が `SSH-2.0-` を返すか） |
+
+`<名前>` は `ctr-<作業名>` / `gpu-<作業名>`。接続名（`ctr-feature1.lab1`）をそのまま渡してもかまいません。
+
+### 接続名
+
+```
+<ctr|gpu>-<作業名>.<ホストID>
+```
+
+| 部分 | 内容 |
+|---|---|
+| `ctr-` / `gpu-` | `ctr-` は GPU なし、`gpu-` は GPU あり（GPU が使えるホストのみ） |
+| `<作業名>` | 英小文字・数字・ハイフン。`ctr-` / `gpu-` を含めて 44 文字以内。コンテナ名・作業ディレクトリ名になる |
+| `<ホストID>` | `cubby add-host` で決めた ID |
+
+### テスト: `tests/smoke.sh`
+
+```
+sh tests/smoke.sh <id> [--cleanup]
+```
+
+| 引数・環境変数 | 内容 |
+|---|---|
+| `--cleanup` | 最後にテスト用のコンテナ・作業ディレクトリ・ボリュームを `ctr-remove --force` で消す |
+| `CTR_SMOKE_NAME` | テスト用の名前（既定 `ctr-smoke`。GPU のテストは `gpu-smoke`） |
+| `CTR_WORK_ROOT` | ホストの作業ディレクトリの置き場（既定: ホストの設定の値） |
+
+### ホストの設定: `~/.config/cubby/config.env`
+
+`cubby add-host` が初回に作ります（既存の値は変えません）。sh の文法で書きます。値を変えたら、既存のコンテナは `ctr-recreate` で作り直すと反映されます。
+
+| 変数 | 既定 | 内容 |
+|---|---|---|
+| `CTR_HOST_ID` | `add-host` の ID | このホストの ID。接続名のホスト ID と一致しない接続は断る |
+| `CTR_WORK_ROOT` | `~/cubby/work` | 作業ディレクトリの置き場 |
+| `CTR_IMAGE` | `localhost/ctr-dev:latest` | コンテナイメージ |
+| `CTR_GPU_ARGS` | `--device nvidia.com/gpu=all` | `gpu-` のコンテナに付ける podman の引数（例 AMD は `--device /dev/kfd --device /dev/dri --group-add keep-groups`） |
+| `CTR_SUDO` | `yes` | `no` にするとコンテナ内の sudo を許可しない |
+| `CTR_MOUNTS_FILE` | `~/.config/cubby/mounts` | 追加マウントの設定ファイル |
+| `CTR_HOSTKEYS` | `~/.config/cubby/hostkeys` | コンテナ用のホスト鍵の置き場 |
+| `CTR_AUTHKEYS` | `~/.config/cubby/authorized_keys` | コンテナに登録する公開鍵の置き場（ファイル名はユーザー名） |
+| `CTR_LOCK_DIR` | `$XDG_RUNTIME_DIR/cubby-locks` | 同時接続の排他に使うロックの置き場 |
+| `CTR_BIN_DIR` | `~/.local/bin` | `ctr-*` の設置先 |
+
+ホストのその他のファイル:
+
+| ファイル | 内容 |
+|---|---|
+| `~/.config/cubby/mounts` | 追加マウントの一覧（`--mount` / `--unmount` で編集。直接編集してもよい） |
+| `~/.config/cubby/detected.env` | `add-host` が自動で書く検出結果（GPU が使えるか）。編集しない |
+| `~/.local/share/cubby/` | `add-host` が転送した cubby のスクリプトとイメージの定義 |
+
+### 手元の環境変数
+
+| 変数 | 内容 |
+|---|---|
+| `CUBBY_SSH_DIR` | `~/.ssh` の代わりに使うディレクトリ（テスト用。ssh に `-F` を付けて、そこの `config` と `known_hosts` を使う） |
 
 ## トラブル時の確認箇所
 
