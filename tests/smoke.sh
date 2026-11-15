@@ -52,7 +52,7 @@ remote() { ssh $SSHF -o BatchMode=yes "$REMOTE" "$1" </dev/null; }
 cssh() { ssh $SSHF -o BatchMode=yes "$CONN" "$1" </dev/null; }
 
 count_containers() {
-  remote "podman ps -aq --filter label=ctr.name=$NAME | wc -l" | tr -d ' '
+  remote "podman ps -aq --filter label=ctr.name=$NAME | wc -l" | tr -d ' \r'
 }
 
 echo "== smoke test: $CONN via $REMOTE =="
