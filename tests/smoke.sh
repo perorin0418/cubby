@@ -167,6 +167,36 @@ else
   sk "12b ctr-remove cleanup (run with --cleanup, or run: ctr-remove $NAME on $REMOTE)"
 fi
 
+# G. GPU（gpu-<作業名>）。ホストの detected.env の結果に従って確かめる
+GNAME="gpu-${NAME#ctr-}"
+GWT="$WT_ROOT/$GNAME"
+gavail=$(remote "sed -n 's/^CTR_GPU_AVAILABLE=//p' \"\${XDG_CONFIG_HOME:-\$HOME/.config}/cubby/detected.env\" 2>/dev/null" | tr -d '\r')
+if [ "$gavail" = yes ]; then
+  if remote "test -e '$GWT'" || [ "$(remote "podman ps -aq --filter label=ctr.name=$GNAME | wc -l" | tr -d ' \r')" != 0 ]; then
+    sk "G1 $GNAME already exists on $REMOTE (remove it first to test GPU containers)"
+  else
+    out=$(rssh -o BatchMode=yes "$GNAME.$ID" 'hostname; nvidia-smi -L' </dev/null 2>/dev/null | tr -d '\r')
+    if printf '%s\n' "$out" | head -n 1 | grep -qx "$GNAME" && printf '%s\n' "$out" | grep -q '^GPU 0'; then
+      ok "G1 $GNAME.$ID sees the GPU: $(printf '%s\n' "$out" | grep -m1 '^GPU 0')"
+    else
+      ng "G1 $GNAME.$ID: $out"
+    fi
+    glabel=$(remote "podman container inspect -f '{{index .Config.Labels \"ctr.gpu\"}}' $GNAME" | tr -d '\r')
+    nolabel=$(remote "podman container inspect -f '{{index .Config.Labels \"ctr.gpu\"}}' $NAME 2>/dev/null || echo gone" | tr -d '\r')
+    [ "$glabel" = yes ] && ok "G2 $GNAME is labeled ctr.gpu=yes (ctr- container: $nolabel)" || ng "G2 label ctr.gpu=$glabel"
+    if [ "$cleanup" = 1 ]; then
+      remote "$RBIN/ctr-remove -y $GNAME" >/dev/null 2>&1 && ok "G3 ctr-remove $GNAME" || ng "G3 ctr-remove $GNAME"
+    fi
+  fi
+else
+  rc=$(remote "$RBIN/ctr-connect $GNAME.$ID </dev/null >/dev/null 2>&1; echo \$?" | tr -d '\r')
+  if [ "$rc" = 2 ] && ! remote "test -e '$GWT'"; then
+    ok "G1 no GPU on $REMOTE: $GNAME.$ID is rejected with exit 2 and nothing is created"
+  else
+    ng "G1 $GNAME.$ID on a host without GPU -> exit $rc"
+  fi
+fi
+
 echo
 echo "result: $pass passed, $fail failed, $skip skipped"
 [ "$fail" = 0 ]

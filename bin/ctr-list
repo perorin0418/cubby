@@ -8,14 +8,21 @@ if [ -r "$CONF" ]; then
   . "$CONF"
 fi
 REPO=${CTR_REPO:-/srv/project}
+CONF_DIR=$(dirname "$CONF")
+CTR_GPU_AVAILABLE=no
+CTR_GPU_INFO=
+if [ -r "$CONF_DIR/detected.env" ]; then
+  # shellcheck disable=SC1091
+  . "$CONF_DIR/detected.env"
+fi
 
-echo "== host: ${CTR_HOST_ID:-$(hostname)} =="
+echo "== host: ${CTR_HOST_ID:-$(hostname)}  gpu: ${CTR_GPU_AVAILABLE}${CTR_GPU_INFO:+ ($CTR_GPU_INFO)} =="
 echo "== containers (label ctr.managed=true) =="
 podman ps -a --filter label=ctr.managed=true \
   --format 'table {{.Names}}\t{{.Status}}\t{{.Image}}\t{{.CreatedAt}}'
 echo
 echo "== volumes =="
-podman volume ls --format '{{.Name}}' | grep -E '^ctr-[a-z0-9][a-z0-9-]*-home$' || echo "(none)"
+podman volume ls --format '{{.Name}}' | grep -E '^(ctr|gpu)-[a-z0-9][a-z0-9-]*-home$' || echo "(none)"
 echo
 echo "== worktrees ($REPO) =="
 git -C "$REPO" worktree list

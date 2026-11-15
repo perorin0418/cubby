@@ -1,5 +1,5 @@
 #!/bin/sh
-# ctr-remove [-y] [--force] <name>[.<host-id>]
+# ctr-remove [-y] [--force] <ctr|gpu>-<work>[.<host-id>]
 #
 # 接続名 <name> のコンテナ・worktree・ホームのボリュームを片付ける。ブランチは消さない。
 #   -y       確認を省略する
@@ -35,7 +35,7 @@ name=${name%%.*}
 
 case "$name" in
   ''|*[!a-z0-9-]*) log "invalid name: $name"; exit 2 ;;
-  ctr-[a-z0-9]*)   ;;
+  ctr-[a-z0-9]*|gpu-[a-z0-9]*) ;;
   *)               log "invalid name: $name"; exit 2 ;;
 esac
 [ "${#name}" -le 44 ] || { log "name too long: $name"; exit 2; }

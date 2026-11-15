@@ -92,9 +92,14 @@ read_secret() {
 
 # ~/.ssh/config の cubby の管理ブロックから、ホスト ID の SSH 名を読む
 #   # >>> cubby <id> ssh-host=<alias> >>>
+#   # >>> cubby <id> ssh-host=<alias> gpu=<yes|no|unknown> >>>   （gpu= は旧版にはない）
 cubby_alias_of() {
-  sed -n "s/^# >>> cubby $1 ssh-host=\\([^ ]*\\) >>>\$/\\1/p" "$SSH_CONFIG" 2>/dev/null | head -n 1
+  sed -n "s/^# >>> cubby $1 ssh-host=\\([^ ]*\\)\\( gpu=[^ ]*\\)\\{0,1\\} >>>\$/\\1/p" "$SSH_CONFIG" 2>/dev/null | head -n 1
+}
+cubby_gpu_of() {
+  g=$(sed -n "s/^# >>> cubby $1 ssh-host=[^ ]* gpu=\\([^ ]*\\) >>>\$/\\1/p" "$SSH_CONFIG" 2>/dev/null | head -n 1)
+  printf '%s\n' "${g:-unknown}"
 }
 cubby_ids() {
-  sed -n 's/^# >>> cubby \([^ ]*\) ssh-host=[^ ]* >>>$/\1/p' "$SSH_CONFIG" 2>/dev/null
+  sed -n 's/^# >>> cubby \([^ ]*\) ssh-host=[^ ]*\( gpu=[^ ]*\)\{0,1\} >>>$/\1/p' "$SSH_CONFIG" 2>/dev/null
 }

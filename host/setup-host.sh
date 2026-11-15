@@ -13,8 +13,11 @@
 #   ~/.local/bin/ctr-*                  スクリプトを設置する
 #   イメージ                             なければビルドする（--rebuild で作り直す）
 #   動作確認                             rootless でコンテナが起動できるか確かめる
+#   GPU                                 GPU 付きのコンテナが起動できるか確かめ、結果を
+#                                       ~/.config/cubby/detected.env に書く（--gpu off で無効）
 #
-# 最後に標準出力へ 1 行だけ「CUBBY_HOSTKEY <ホスト公開鍵>」を出す（手元が known_hosts に登録する）。
+# 最後に標準出力へ「CUBBY_GPU yes|no [情報]」と「CUBBY_HOSTKEY <ホスト公開鍵>」を出す
+# （手元が known_hosts に登録し、GPU の有無を表示する）。
 # それ以外の出力はすべて標準エラー出力へ出す。
 set -eu
 
@@ -23,9 +26,10 @@ log()  { printf 'setup-host: %s\n' "$*" >&2; }
 warn() { printf 'setup-host: WARNING: %s\n' "$*" >&2; }
 die()  { printf 'setup-host: ERROR: %s\n' "$*" >&2; exit 1; }
 
-id_arg= repo_arg= repo_url= wt_arg= pubkeys= rebuild=0
+id_arg= repo_arg= repo_url= wt_arg= pubkeys= rebuild=0 gpu_mode=auto
 while [ $# -gt 0 ]; do
   case "$1" in
+    --gpu)       gpu_mode=$2; shift 2 ;;
     --id)        id_arg=$2; shift 2 ;;
     --repo)      repo_arg=$2; shift 2 ;;
     --repo-url)  repo_url=$2; shift 2 ;;
@@ -163,5 +167,38 @@ if command -v loginctl >/dev/null 2>&1 && [ -d /run/systemd/system ]    && [ "$(
   warn "linger is off for $(id -un); containers stop when the last SSH session ends"
 fi
 
+# GPU: ctr-connect と同じ指定で GPU 付きのコンテナが起動できるか確かめ、detected.env に書く
+# （CTR_GPU_ARGS を config.env で変えた場合、例えば AMD の --device /dev/kfd --device /dev/dri
+#   では、nvidia-smi の代わりに true で起動だけを確かめる）
+gpu_avail=no gpu_info=
+if [ "$gpu_mode" != off ]; then
+  if [ -n "${CTR_GPU_ARGS:-}" ]; then
+    gargs=$CTR_GPU_ARGS; gtest=true
+  else
+    gargs='--device nvidia.com/gpu=all'; gtest='nvidia-smi -L'
+  fi
+  if [ -n "${CTR_GPU_ARGS:-}" ] || { command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi -L >/dev/null 2>&1; }; then
+    # shellcheck disable=SC2086
+    if gout=$(podman run --rm --userns=keep-id --user root --security-opt label=disable \
+                --uts=private --network=private $gargs "$IMAGE" $gtest 2>&1 </dev/null); then
+      gpu_avail=yes
+      n=$(printf '%s\n' "$gout" | grep -c '^GPU [0-9]' || true)
+      [ "$n" -gt 0 ] && gpu_info="$n GPU: $(printf '%s\n' "$gout" | sed -n 's/^GPU 0: \([^(]*\).*/\1/p' | sed 's/ *$//')"
+      log "GPU containers available${gpu_info:+ ($gpu_info)}"
+    else
+      printf '%s\n' "$gout" | tail -n 5 >&2
+      warn "the NVIDIA driver works on the host, but a GPU container does not start; GPU containers are disabled"
+    fi
+  else
+    log "no usable GPU on this host (gpu-* connections are disabled)"
+  fi
+fi
+{
+  echo "# written by setup-host.sh (cubby). Do not edit; override in config.env instead."
+  echo "CTR_GPU_AVAILABLE=$gpu_avail"
+  echo "CTR_GPU_INFO='$(printf '%s' "$gpu_info" | tr -d "'")'"
+} > "$CONF_DIR/detected.env"
+
 log "done (host id: ${CTR_HOST_ID:-unset})"
+printf 'CUBBY_GPU %s %s\n' "$gpu_avail" "$gpu_info"
 printf 'CUBBY_HOSTKEY %s\n' "$(cut -d' ' -f1,2 "$key.pub")"

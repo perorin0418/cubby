@@ -1,13 +1,16 @@
 #!/bin/sh
-# ctr-connect <name>[.<host-id>]
+# ctr-connect <ctr|gpu>-<work>[.<host-id>]
 #
 # ~/.ssh/config の ProxyCommand から呼ばれる。接続名のコンテナと worktree を用意し
 # （なければ作る・止まっていれば起動する）、コンテナ内の sshd と標準入出力をつなぐ。
 # rootless Podman で動かす（sudo 不要）。
 #
-# 接続名は ctr-<作業名>.<ホストID>。ドット以降はホストの選択に使うだけで、コンテナ名・
-# ブランチ名・worktree 名には ctr-<作業名> を使う。config.env の CTR_HOST_ID が設定されて
-# いれば、ホストID が一致しない接続は拒否する（接続先の取り違え防止）。
+# 接続名は ctr-<作業名>.<ホストID>（GPU なし）または gpu-<作業名>.<ホストID>（GPU あり）。
+# ドット以降はホストの選択に使うだけで、コンテナ名・ブランチ名・worktree 名には
+# ctr-<作業名> / gpu-<作業名> を使う。config.env の CTR_HOST_ID が設定されていれば、
+# ホストID が一致しない接続は拒否する（接続先の取り違え防止）。
+# gpu- のコンテナには CTR_GPU_ARGS（既定: NVIDIA の CDI デバイス nvidia.com/gpu=all）を付ける。
+# setup-host.sh がこのホストで GPU を使えないと判定した場合（detected.env）は拒否する。
 #
 # 重要: 標準出力は SSH の通信路そのもの。ログ・git・podman の出力は必ず標準エラー出力へ出す。
 #       また、準備中のコマンドが SSH の入力を読み取らないよう、標準入力は /dev/null にする。
@@ -19,6 +22,12 @@ if [ -r "$CONF" ]; then
   . "$CONF"
 fi
 CONF_DIR=$(dirname "$CONF")
+# setup-host.sh が検出した値（GPU が使えるか）。config.env の値があればそちらを優先する。
+if [ -r "$CONF_DIR/detected.env" ]; then
+  # shellcheck disable=SC1091
+  . "$CONF_DIR/detected.env"
+  [ -r "$CONF" ] && . "$CONF"
+fi
 REPO=${CTR_REPO:-/srv/project}
 WT_ROOT=${CTR_WT_ROOT:-/srv/worktrees}
 IMAGE=${CTR_IMAGE:-localhost/ctr-dev:latest}
@@ -26,6 +35,8 @@ HOSTKEYS=${CTR_HOSTKEYS:-$CONF_DIR/hostkeys}
 AUTHKEYS=${CTR_AUTHKEYS:-$CONF_DIR/authorized_keys}
 LOCK_DIR=${CTR_LOCK_DIR:-${XDG_RUNTIME_DIR:-/tmp/cubby-$(id -u)}/cubby-locks}
 HOST_ID=${CTR_HOST_ID:-}
+GPU_AVAILABLE=${CTR_GPU_AVAILABLE:-no}
+GPU_ARGS=${CTR_GPU_ARGS:---device nvidia.com/gpu=all}
 
 log() { printf 'ctr-connect: %s\n' "$*" >&2; }
 
@@ -37,10 +48,12 @@ suffix=
 [ "$name" = "$full" ] || suffix=${full#*.}
 case "$name" in
   ''|*[!a-z0-9-]*) log "invalid name: $full"; exit 2 ;;
-  ctr-[a-z0-9]*)   ;;
+  ctr-[a-z0-9]*|gpu-[a-z0-9]*) ;;
   *)               log "invalid name: $full"; exit 2 ;;
 esac
 [ "${#name}" -le 44 ] || { log "name too long: $name"; exit 2; }
+gpu=no
+case "$name" in gpu-*) gpu=yes ;; esac
 if [ "$name" != "$full" ]; then
   case "$suffix" in
     ''|*[!a-z0-9-]*) log "invalid host id: $full"; exit 2 ;;
@@ -48,6 +61,11 @@ if [ "$name" != "$full" ]; then
   if [ -n "$HOST_ID" ] && [ "$suffix" != "$HOST_ID" ]; then
     log "host id mismatch: $suffix (this host is $HOST_ID)"; exit 2
   fi
+fi
+
+if [ "$gpu" = yes ] && [ "$GPU_AVAILABLE" != yes ]; then
+  log "this host has no usable GPU (${HOST_ID:-$(hostname)}); connect as ctr-${name#gpu-} instead, or rerun cubby add-host after installing the GPU driver"
+  exit 2
 fi
 
 wt="$WT_ROOT/$name"
@@ -78,9 +96,13 @@ fi
 # --uts/--network private : containers.conf でホストの名前空間が既定にされていても、
 #                    ホスト名を設定でき、sshd :22 がホストの sshd と衝突しないようにする。
 if ! podman container exists "$name" </dev/null 9>&-; then
-  log "creating container $name"
+  log "creating container $name (gpu: $gpu)"
+  set --
+  # shellcheck disable=SC2086
+  [ "$gpu" = yes ] && set -- $GPU_ARGS
   podman run -d --name "$name" --hostname "$name" \
-    --label ctr.managed=true --label ctr.name="$name" \
+    --label ctr.managed=true --label ctr.name="$name" --label ctr.gpu="$gpu" \
+    "$@" \
     --uts=private --network=private \
     --userns=keep-id --user root \
     --security-opt label=disable \

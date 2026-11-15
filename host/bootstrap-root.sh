@@ -10,17 +10,22 @@
 #     - /etc/subuid・/etc/subgid に USER の範囲（65536 個）
 #     - USER の linger（SSH が切れてもコンテナと Claude Code 本体を動かし続ける）
 #     - 元リポジトリ・worktree の置き場のディレクトリ（なければ USER 所有で作る）
+#     - GPU（--gpu auto のとき。既定）: NVIDIA のドライバが動いていれば、
+#       NVIDIA Container Toolkit を入れ、CDI の定義（/etc/cdi/nvidia.yaml）を作る。
+#       ドライバの版が変わって CDI の定義が古くなっていれば作り直す。
+#       ドライバ自体は入れない（カーネル・再起動・Secure Boot が絡むため）。
 #
 # 既存のディレクトリの所有者や中身は変えない。
 set -eu
 
-user= repo= wt= check=0
+user= repo= wt= check=0 gpu=auto
 while [ $# -gt 0 ]; do
   case "$1" in
     --user)      user=$2; shift 2 ;;
     --repo)      repo=$2; shift 2 ;;
     --worktrees) wt=$2; shift 2 ;;
     --check)     check=1; shift ;;
+    --gpu)       gpu=$2; shift 2 ;;
     *) echo "bootstrap: unknown option: $1" >&2; exit 1 ;;
   esac
 done
@@ -38,6 +43,55 @@ missing_cmds() {
   for c in $REQUIRED_CMDS; do command -v "$c" >/dev/null 2>&1 || printf '%s ' "$c"; done
 }
 has_subid() { grep -q "^$user:" "$1" 2>/dev/null; }
+
+# ---- GPU（NVIDIA） ----
+CDI_SPEC=/etc/cdi/nvidia.yaml
+nvidia_driver_ok() { [ "$gpu" = auto ] && command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi -L >/dev/null 2>&1; }
+nvidia_hw_present() {
+  [ -e /proc/driver/nvidia/version ] && return 0
+  command -v lspci >/dev/null 2>&1 && lspci 2>/dev/null | grep -qi 'nvidia' && return 0
+  return 1
+}
+driver_version() { nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>/dev/null | head -n 1 | tr -d ' \r'; }
+# CDI の定義があり、今のドライバの版で作られているか（ドライバ更新後は作り直しが要る）
+cdi_fresh() {
+  [ -r "$CDI_SPEC" ] || return 1
+  v=$(driver_version)
+  [ -z "$v" ] || grep -qF "$v" "$CDI_SPEC"
+}
+# GPU のために root が要る作業: 出力が空なら不要
+gpu_needs() {
+  nvidia_driver_ok || return 0
+  command -v nvidia-ctk >/dev/null 2>&1 || { printf 'nvidia-container-toolkit '; }
+  cdi_fresh || printf 'cdi-spec '
+}
+install_nvidia_toolkit() {
+  log "installing NVIDIA Container Toolkit from NVIDIA's repository"
+  base=https://nvidia.github.io/libnvidia-container
+  if command -v apt-get >/dev/null 2>&1; then
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get update -q >&2
+    apt-get install -y -q curl gnupg ca-certificates >&2
+    curl -fsSL "$base/gpgkey" | gpg --batch --yes --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg
+    curl -fsSL "$base/stable/deb/nvidia-container-toolkit.list" \
+      | sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g' \
+      > /etc/apt/sources.list.d/nvidia-container-toolkit.list
+    apt-get update -q >&2
+    apt-get install -y -q nvidia-container-toolkit >&2
+  elif command -v dnf >/dev/null 2>&1 || command -v yum >/dev/null 2>&1; then
+    curl -fsSL "$base/stable/rpm/nvidia-container-toolkit.repo" > /etc/yum.repos.d/nvidia-container-toolkit.repo
+    if command -v dnf >/dev/null 2>&1; then dnf install -y -q nvidia-container-toolkit >&2
+    else yum install -y -q nvidia-container-toolkit >&2; fi
+  elif command -v zypper >/dev/null 2>&1; then
+    zypper -n ar -f "$base/stable/rpm/nvidia-container-toolkit.repo" >&2 2>/dev/null || true
+    zypper -n --gpg-auto-import-keys install nvidia-container-toolkit >&2
+  elif command -v pacman >/dev/null 2>&1; then
+    pacman -S --noconfirm --needed nvidia-container-toolkit >&2
+  else
+    log "WARNING: do not know how to install nvidia-container-toolkit here; GPU containers stay disabled"
+    return 1
+  fi
+}
 # newuidmap/newgidmap が setuid か file capability を持っているか（ないと rootless で名前空間を作れない）
 uidmap_ok() {
   for b in newuidmap newgidmap; do
@@ -83,6 +137,7 @@ if [ "$check" = 1 ]; then
   has_subid /etc/subuid || need="$need subuid"
   has_subid /etc/subgid || need="$need subgid"
   if linger_needed; then need="$need linger"; fi
+  g=$(gpu_needs); [ -z "$g" ] || need="$need gpu($g)"
   for d in "$repo" "$wt"; do
     set +e; dir_state "$d"; s=$?; set -e
     case $s in
@@ -171,5 +226,22 @@ for d in "$repo" "$wt"; do
     2) die "$d exists but is not writable by $user; fix its owner or choose another path" ;;
   esac
 done
+
+# GPU（NVIDIA）
+if nvidia_driver_ok; then
+  if ! command -v nvidia-ctk >/dev/null 2>&1; then
+    install_nvidia_toolkit || true
+  fi
+  if command -v nvidia-ctk >/dev/null 2>&1 && ! cdi_fresh; then
+    mkdir -p "$(dirname "$CDI_SPEC")"
+    if nvidia-ctk cdi generate --output="$CDI_SPEC" >&2; then
+      log "generated CDI spec $CDI_SPEC (driver $(driver_version))"
+    else
+      log "WARNING: nvidia-ctk cdi generate failed; GPU containers stay disabled"
+    fi
+  fi
+elif [ "$gpu" = auto ] && nvidia_hw_present; then
+  log "WARNING: an NVIDIA GPU seems present but nvidia-smi does not work; install the NVIDIA driver (needs a reboot), then rerun cubby add-host"
+fi
 
 log "root setup done"
