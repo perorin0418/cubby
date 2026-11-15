@@ -1,11 +1,12 @@
 # 参考: `cubby add-host lab1 --hostname lab1.example.com --user alice --cloudflared` が
 # ~/.ssh/config の先頭に書く管理ブロック。通常は手で書く必要はない（再実行すると置き換わる）。
 # コマンドは絶対パスで書かれる（GUI から起動した Claude Desktop は PATH が最小限のため）。
+# コンテナにもホストと同じユーザー（この例では alice）でログインする。
 #
 # macOS（Homebrew の cloudflared）の例:
 # >>> cubby lab1 ssh-host=lab1 gpu=yes >>>
 Host ctr-*.lab1 gpu-*.lab1
-  User dev
+  User alice
   ProxyCommand /usr/bin/ssh lab1 .local/bin/ctr-connect %n
   HostKeyAlias cubby-lab1
   ServerAliveInterval 30
@@ -19,7 +20,7 @@ Host lab1
 # Windows の例（Windows 標準の OpenSSH を使う。空白を含むパスは二重引用符で囲まれる）:
 # >>> cubby lab1 ssh-host=lab1 gpu=yes >>>
 # Host ctr-*.lab1 gpu-*.lab1
-#   User dev
+#   User alice
 #   ProxyCommand C:/WINDOWS/System32/OpenSSH/ssh.exe lab1 .local/bin/ctr-connect %n
 #   HostKeyAlias cubby-lab1
 #   ServerAliveInterval 30

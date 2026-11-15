@@ -25,7 +25,7 @@ Claude Desktop ──SSH(ctr-feat.lab1)──▶ ~/.ssh/config の cubby ブロ�
                   ▼
    podman exec -i ctr-feat nc 127.0.0.1 22
                   ▼
-   コンテナ内 sshd → dev ユーザー → Claude Code 本体（~/.claude/remote/）
+   コンテナ内 sshd → ホストと同じユーザー（例 alice）→ Claude Code 本体（~/.claude/remote/）
 ```
 
 各ホストに置かれるもの（すべてログインユーザーの権限）:
@@ -33,11 +33,12 @@ Claude Desktop ──SSH(ctr-feat.lab1)──▶ ~/.ssh/config の cubby ブロ�
 | 物 | 場所 |
 |---|---|
 | コンテナ | `ctr-<作業名>` / `gpu-<作業名>`（ラベル `ctr.managed=true`）。ポートは公開しない |
-| ホーム | ボリューム `<名前>-home` → コンテナの `/home/dev`（Claude Code のセッション・設定・認証情報） |
+| ユーザー | コンテナ用のユーザーは作らない。**ホストのログインユーザーそのもの**（同じ名前・UID・GID・ホームのパス）でコンテナに入る |
+| ホーム | ボリューム `<名前>-home` → コンテナの、ホストと同じホームのパス（例 `/home/alice`）。Claude Code のセッション・設定・認証情報 |
 | 作業ディレクトリ | `~/cubby/work/<名前>`（`--work-root` で変更可）。コンテナにも同じパスでマウント |
 | 設定 | `~/.config/cubby/config.env`、追加マウントは `~/.config/cubby/mounts` |
 | ホスト鍵 | `~/.config/cubby/hostkeys/`（ホストごとに 1 つ。そのホストの全コンテナで共有） |
-| 公開鍵 | `~/.config/cubby/authorized_keys/dev` |
+| 公開鍵 | `~/.config/cubby/authorized_keys/<ユーザー名>` |
 | スクリプト | `~/.local/bin/ctr-connect`・`ctr-list`・`ctr-remove`・`ctr-recreate`（元は `~/.local/share/cubby/`） |
 
 ## リポジトリの中身
@@ -56,7 +57,8 @@ bin/ctr-common.sh       ホスト側のスクリプトが共有する部分（�
 host/bootstrap-root.sh  root が要るホストの準備（cubby add-host が必要なときだけ sudo で実行する）
 host/setup-host.sh      ホストの準備（cubby add-host が自動で実行する）
 host/preflight.sh       ホストの事前確認（変更しない）
-image/                  コンテナイメージ（sshd, nc, git, curl, tini, dev ユーザー）
+image/                  コンテナイメージ（sshd, nc, git, curl, tini。利用者のユーザーは含めない）
+image/ctr-entrypoint.sh 起動時にホストのユーザーをコンテナの /etc/passwd に登録する
 config.env.example      ホスト側の設定の見本
 tests/smoke.sh          CLI で確かめられる受け入れテスト（手元から実行）
 ```
@@ -146,7 +148,9 @@ Desktop には登録した SSH 接続を編集・削除する画面がない時�
 
 cubby はリポジトリを管理しません。各コンテナには空の作業ディレクトリ（ホストの `~/cubby/work/<名前>`、コンテナ内も同じパス）が用意されるだけです。必要なリポジトリは、コンテナ内で Claude Code に clone させてください（例「`git@github.com:example/web.git` を clone して…」）。1 つのコンテナで複数のリポジトリを扱っても、リポジトリを使わない作業でもかまいません。
 
-- SSH でログインした直後の場所はホーム（`/home/dev`）です。作業ディレクトリは `/home/<ログインユーザー>/cubby/work/<名前>` です（Claude Code のセッションを始めるディレクトリとして指定します）。
+- **ユーザー**: コンテナ用のユーザーは作りません。ホストのログインユーザー（例 alice、UID 1000）そのものとしてコンテナに入ります。作業ディレクトリや追加マウントのファイルは、ホストとコンテナで所有者が一致します。
+- **ホームは同じパスでも中身は別**です。コンテナのホーム（例 `/home/alice`）はコンテナごとのボリュームで、ホストの `/home/alice` の中身は見えません（作業ディレクトリと、`--mount` で指定したものだけが見えます）。
+- SSH でログインした直後の場所はホーム（ホストと同じパス。例 `/home/alice`）です。作業ディレクトリは `~/cubby/work/<名前>`（例 `/home/alice/cubby/work/ctr-feature1`）で、ホストとコンテナで同じパスです（Claude Code のセッションを始めるディレクトリとして指定します）。
 - 作業ディレクトリはホストからも同じパスで見えます。コンテナで作ったファイルは、ホストではログインユーザーの所有になります。
 - コンテナを作り直しても（`ctr-recreate`、`podman rm`）、作業ディレクトリとホームは残ります。
 - **GitHub などの認証はコンテナ内で用意してください**。ホーム（ボリューム）に置いたものはコンテナを作り直しても残るので、一度設定すればそのコンテナでは使い続けられます（例: コンテナ内で `gh auth login`（gh は別途インストール）、デプロイキーや個人用の鍵を `~/.ssh` に置く、`git config --global user.name/user.email`）。
@@ -200,14 +204,14 @@ sh client/cubby add-host lab1 --unmount /scratch
 # ~/.config/cubby/mounts
 /data/datasets:/datasets:ro
 /scratch
-/home/alice/.cache/huggingface:/home/dev/.cache/huggingface
+/home/alice/.cache/huggingface:ro
 ```
 
 - **既存のコンテナへの反映**: マウントはコンテナを作るときに決まります。設定を変えたら、ホストで `ctr-recreate <名前>` を実行してください。コンテナだけを作り直し、ホームと作業ディレクトリは残ります（動いている Claude Code のセッションは止まりますが、記録はホームに残ります）。次の接続で新しい設定のコンテナが作られます。
 - 反映していないコンテナは、`add-host` の出力・`ctr-list`（`cubby list`）・接続時のメッセージで知らせます。接続時に自動で作り直すことはしません（セッションが切れるため）。
 - ホストにないディレクトリは、警告を出して飛ばします（接続は失敗させません）。後から作られたら、`ctr-recreate` で反映できます。
 - rootless なので、コンテナから書けるのはホストのログインユーザーが書けるファイルだけです。
-- `/etc`・`/usr`・`/home/dev` そのものなど、コンテナの動作に必要な場所にはマウントできません（`/home/dev/.cache/...` のような下の階層はできます）。
+- `/etc`・`/usr`・ホーム（ホストと同じパス）そのものなど、コンテナの動作に必要な場所にはマウントできません（`~/.cache/huggingface` のような下の階層はできます。コンテナのホームはホストと同じパスなので、ホストのパスをそのまま書けば同じ場所に見えます）。
 
 ## 片付け
 
@@ -261,7 +265,7 @@ Desktop での確認（セッションがコンテナ内で動く・再起動後
 | `invalid name` / `host id mismatch` | 接続名が `ctr-<作業名>.<ホストID>` の形か。ホスト ID はホストの `~/.config/cubby/config.env` の `CTR_HOST_ID` |
 | `lock timeout` | 同名の ctr-connect が準備中のまま残っていないか（`$XDG_RUNTIME_DIR/cubby-locks`） |
 | `sshd not ready` | ホストで `podman logs ctr-x`。ホスト鍵の権限（600） |
-| `Permission denied (publickey)` | `~/.config/cubby/authorized_keys/dev` に手元の公開鍵があるか。ssh-agent に鍵があるか。`cubby add-host` を再実行すると追記される |
+| `Permission denied (publickey)` | `~/.config/cubby/authorized_keys/<ユーザー名>` に手元の公開鍵があるか。ssh_config の `Host ctr-*` の `User` がホストのユーザー名か。ssh-agent に鍵があるか。`cubby add-host` を再実行すると追記される |
 | `container host key ... changed` | ホスト側でホスト鍵を作り直した場合。意図したものなら `--replace-hostkey` を付けて再実行 |
 | Desktop を閉じるとセッションが消える | ホストの linger（`loginctl show-user <ユーザー> -p Linger`） |
 | コンテナ作成時に `keep-id` や `newuidmap` のエラー | `/etc/subuid`・`/etc/subgid` にログインユーザーの行があるか |
@@ -293,5 +297,6 @@ Desktop での確認（セッションがコンテナ内で動く・再起動後
 | GPU の扱いなし | 接続名 `gpu-<作業名>` で GPU 付きコンテナ（CDI `nvidia.com/gpu=all`）。NVIDIA Container Toolkit と CDI の定義を自動で準備し、使えるホストかを自動判定 | 利用者の要望 |
 | マウントは repo の `.git`・worktree・ホーム・鍵のみ | ホストごとの `~/.config/cubby/mounts` で任意のディレクトリを全コンテナにマウント。`cubby add-host --mount/--unmount`、反映は `ctr-recreate` | 利用者の要望 |
 | — | `~/.ssh/config` の書き換えを mkdir のロックで排他し、別のファイルに書いてから置き換える | 複数の `add-host` を同時に動かすと、互いのブロックを上書きしたり、書き換え中のファイルを ssh が読んで失敗したりしたため（検証で判明） |
+| コンテナ内に `dev` ユーザーを作り（UID/GID をホストに合わせてイメージをビルド）、`dev` でログイン | ユーザーは作らない。起動時にホストのログインユーザー（同じ名前・UID・GID・ホームのパス）をコンテナの `/etc/passwd` に登録し、その名前でログインする。イメージはホストに依存しない（版のラベルで古いイメージを自動で作り直す） | 権限の食い違いを避けるため（利用者の要望） |
 | `docker run --init` | イメージに tini を入れて PID 1 にする | ホストの catatonit の有無に依存しないため |
 | 手元は macOS・Linux の OpenSSH 前提、`~/.ssh/config` に手で追記 | Windows・macOS・Linux に対応。`~/.ssh/config` の先頭に管理ブロックを書く（`Include` は使わない）。ProxyCommand は絶対パス。Windows は Windows 標準の OpenSSH を使う | 利用者の要望。GUI から起動した Desktop の PATH が最小限のため |

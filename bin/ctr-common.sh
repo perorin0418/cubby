@@ -25,11 +25,12 @@ EOF
   case "$src" in /*) ;; *) return 1 ;; esac
   case "$dst" in /*) ;; *) return 1 ;; esac
   case "$mode" in ro|rw) ;; *) return 1 ;; esac
-  # コンテナの動作に必要な場所を上書きさせない
+  # コンテナの動作に必要な場所を上書きさせない（ホーム自体＝ホストのホームと同じパスも。下の階層は可）
   case "$dst" in
-    /|/home|/home/dev|/home/dev/|/etc|/etc/*|/usr|/usr/*|/bin|/bin/*|/sbin|/sbin/*|/lib|/lib/*|/proc|/proc/*|/sys|/sys/*|/dev|/dev/*|/run|/run/*)
+    /|/home|/home/|/etc|/etc/*|/usr|/usr/*|/bin|/bin/*|/sbin|/sbin/*|/lib|/lib/*|/proc|/proc/*|/sys|/sys/*|/dev|/dev/*|/run|/run/*)
       return 1 ;;
   esac
+  [ "${dst%/}" != "${HOME%/}" ] || return 1
   printf '%s:%s:%s\n' "$src" "$dst" "$mode"
 }
 

@@ -87,7 +87,7 @@ if [ ! -d "$work" ]; then
   mkdir -p "$work"
 fi
 
-# --userns=keep-id : ホストのログインユーザーをコンテナ内の同じ UID（= dev）に対応づける。
+# --userns=keep-id : ホストのログインユーザーをコンテナ内の同じ UID に対応づける。
 #                    作業ディレクトリの所有者がホストと一致し、書き込みや git の所有者チェックが通る。
 # --user root      : keep-id は既定の実行ユーザーをログインユーザーにするので、sshd 用に root に戻す
 #                    （root といっても rootless のユーザー名前空間の中の root）。
@@ -108,14 +108,18 @@ if ! podman container exists "$name" </dev/null 9>&-; then
   done <<EOF
 $(ctr_mount_specs)
 EOF
+  # コンテナのユーザーはホストのログインユーザーそのもの（同じ名前・UID・GID・ホームのパス）。
+  # ctr-entrypoint が起動時に /etc/passwd に登録する（--passwd=false: podman 自身の登録は使わない）。
+  # ホームはコンテナごとのボリュームで、ホストのホームと同じパスにマウントする。
   podman run -d --name "$name" --hostname "$name" \
     --label ctr.managed=true --label ctr.name="$name" --label ctr.gpu="$gpu" \
     --label ctr.mounts="$mount_sig" \
     --uts=private --network=private \
-    --userns=keep-id --user root \
+    --userns=keep-id --user root --passwd=false \
+    -e CTR_USER="$(id -un)" -e CTR_UID="$(id -u)" -e CTR_GID="$(id -g)" -e CTR_HOME="$HOME" \
     --security-opt label=disable \
     --restart unless-stopped \
-    -v "$name-home:/home/dev" \
+    -v "$name-home:$HOME" \
     -v "$work:$work" \
     -v "$HOSTKEYS:/etc/ssh/ctr-hostkeys:ro" \
     -v "$AUTHKEYS:/etc/ssh/ctr-authorized_keys:ro" \

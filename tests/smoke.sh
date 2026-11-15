@@ -92,6 +92,15 @@ n=$(count_containers)
 h=$(cssh hostname 2>/dev/null | tr -d '\r')
 [ "$h" = "$NAME" ] && ok "4 ssh $CONN hostname -> $h" || ng "4 ssh $CONN hostname -> $h"
 
+# 4b. コンテナのユーザーはホストのログインユーザーそのもの（名前・UID・GID・ホームのパス）
+hid=$(remote 'echo "$(id -un) $(id -u) $(id -g) $HOME"' | tr -d '\r')
+cid=$(cssh 'echo "$(id -un) $(id -u) $(id -g) $HOME"; ls -ld "$HOME" | cut -d" " -f3' 2>/dev/null | tr -d '\r')
+if [ "$(printf '%s\n' "$cid" | head -n 1)" = "$hid" ] && [ "$(printf '%s\n' "$cid" | sed -n 2p)" = "${hid%% *}" ]; then
+  ok "4b container user is the host user ($hid), owns its home"
+else
+  ng "4b container user: host '$hid' / container '$(printf '%s' "$cid" | tr '\n' ' ')'"
+fi
+
 # 5. 作業ディレクトリ: 空で始まり、ホストと同じパスで見え、書いたものがホストから見える
 if [ "$(cssh "ls -A '$WORK' | wc -l" 2>/dev/null | tr -d ' \r')" = 0 ] \
    && cssh "echo hi > '$WORK/ctr-smoke-file'" >/dev/null 2>&1 \

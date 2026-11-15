@@ -8,7 +8,7 @@
 #
 #   ~/.config/cubby/config.env          なければ作る（既存の値は変えない）
 #   ~/.config/cubby/hostkeys/           全コンテナ共通のホスト鍵。なければ作る（上書きしない）
-#   ~/.config/cubby/authorized_keys/dev 渡された公開鍵のうち未登録の行だけ追記する
+#   ~/.config/cubby/authorized_keys/<ユーザー名> 渡された公開鍵のうち未登録の行だけ追記する
 #   作業ディレクトリの置き場             なければ作る（既定 ~/cubby/work）
 #   ~/.local/bin/ctr-*                  スクリプトを設置する
 #   ~/.config/cubby/mounts              --mount / --unmount を反映する
@@ -83,8 +83,14 @@ fi
 chmod 600 "$key"
 chmod 644 "$key.pub"
 
-# authorized_keys（未登録の行だけ追記する。既存の行は消さない）
-ak="$AUTHKEYS/dev"
+# authorized_keys（未登録の行だけ追記する。既存の行は消さない）。
+# コンテナにはホストのユーザー名でログインするので、ファイル名もユーザー名（sshd の %u）。
+ak="$AUTHKEYS/$(id -un)"
+if [ -f "$AUTHKEYS/dev" ] && [ ! -e "$ak" ]; then
+  # 旧版（コンテナ内のユーザーが dev だった）の登録を引き継ぐ
+  mv "$AUTHKEYS/dev" "$ak"
+  log "moved $AUTHKEYS/dev to $ak (container user is now $(id -un))"
+fi
 touch "$ak"
 chmod 644 "$ak"
 if [ -n "$pubkeys" ]; then
@@ -170,21 +176,28 @@ if [ -e "$CONF_DIR/.needs-migrate" ]; then
   log "ran podman system migrate"
 fi
 
-# イメージ（dev の UID/GID はログインユーザーと同じにする。--userns=keep-id で対応づけるため）
-if [ "$rebuild" = 1 ] || ! podman image exists "$IMAGE"; then
-  log "building image $IMAGE (uid $(id -u), gid $(id -g)) ..."
-  podman build -q --build-arg DEV_UID="$(id -u)" --build-arg DEV_GID="$(id -g)" \
-    -t "$IMAGE" "$here/image" >&2
+# イメージ。利用者のユーザーはイメージに含めない（起動時にホストのユーザーを登録する）ので、
+# ホストに依存しない。版（cubby.image-version）が期待と違う古いイメージは作り直す。
+want_ver=$(sed -n 's/^LABEL cubby.image-version="\(.*\)"/\1/p' "$here/image/Dockerfile")
+have_ver=$(podman image inspect -f '{{index .Labels "cubby.image-version"}}' "$IMAGE" 2>/dev/null || true)
+if [ "$rebuild" = 1 ] || [ "$have_ver" != "$want_ver" ]; then
+  [ -z "$have_ver" ] || [ "$have_ver" = "$want_ver" ] || log "image $IMAGE is version $have_ver; rebuilding as $want_ver"
+  log "building image $IMAGE ..."
+  podman build -q -t "$IMAGE" "$here/image" >&2
   log "built $IMAGE"
 fi
 
-# rootless でコンテナが動くか（ctr-connect と同じ指定で）確かめる
-if ! out=$(podman run --rm --userns=keep-id --user root --security-opt label=disable \
-            --uts=private --network=private "$IMAGE" id -un dev 2>&1 </dev/null); then
+# rootless でコンテナが動き、ホストのユーザーが同じ名前・UID・ホームで使えるか（ctr-connect と同じ指定で）
+want_id="$(id -un) $(id -u) $(id -g) $HOME"
+if ! out=$(podman run --rm --userns=keep-id --user root --passwd=false --security-opt label=disable \
+            --uts=private --network=private \
+            -e CTR_USER="$(id -un)" -e CTR_UID="$(id -u)" -e CTR_GID="$(id -g)" -e CTR_HOME="$HOME" \
+            "$IMAGE" sh -c 'u=$CTR_USER; echo "$(id -un "$u") $(id -u "$u") $(id -g "$u") $(getent passwd "$u" | cut -d: -f6)"' \
+            2>&1 </dev/null) || [ "$(printf '%s\n' "$out" | tail -n 1)" != "$want_id" ]; then
   printf '%s\n' "$out" >&2
-  die "cannot run a rootless container (check /etc/subuid, /etc/subgid, and user namespaces / AppArmor)"
+  die "cannot run a rootless container as $(id -un) (check /etc/subuid, /etc/subgid, and user namespaces / AppArmor)"
 fi
-log "rootless container check passed"
+log "rootless container check passed (user $want_id)"
 
 # linger（bootstrap-root.sh が有効化する。無効だと SSH が切れたときにコンテナが止まる）
 if command -v loginctl >/dev/null 2>&1 && [ -d /run/systemd/system ]    && [ "$(loginctl show-user "$(id -un)" -p Linger --value 2>/dev/null)" != yes ]; then
@@ -203,7 +216,7 @@ if [ "$gpu_mode" != off ]; then
   fi
   if [ -n "${CTR_GPU_ARGS:-}" ] || { command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi -L >/dev/null 2>&1; }; then
     # shellcheck disable=SC2086
-    if gout=$(podman run --rm --userns=keep-id --user root --security-opt label=disable \
+    if gout=$(podman run --rm --userns=keep-id --user root --passwd=false --security-opt label=disable \
                 --uts=private --network=private $gargs "$IMAGE" $gtest 2>&1 </dev/null); then
       gpu_avail=yes
       n=$(printf '%s\n' "$gout" | grep -c '^GPU [0-9]' || true)
@@ -232,5 +245,6 @@ done
 [ -z "$outdated" ] || warn "containers created with older mount settings:$outdated (apply with: ctr-recreate <name>)"
 
 log "done (host id: ${CTR_HOST_ID:-unset})"
+printf 'CUBBY_USER %s\n' "$(id -un)"
 printf 'CUBBY_GPU %s %s\n' "$gpu_avail" "$gpu_info"
 printf 'CUBBY_HOSTKEY %s\n' "$(cut -d' ' -f1,2 "$key.pub")"

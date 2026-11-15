@@ -66,6 +66,16 @@ no_quote() {
 cfgval() {
   case "$1" in *' '*) printf '"%s"' "$1" ;; *) printf '%s' "$1" ;; esac
 }
+# 管理ブロックの「Host ctr-*...」の User（コンテナのログインユーザー）を読む
+ctr_user_of() {
+  awk -v id="$1" '
+    index($0, "# >>> cubby " id " ssh-host=") == 1 { inb = 1; next }
+    inb && $0 == "# <<< cubby " id " <<<"      { exit }
+    inb && $1 == "Host"                          { inctr = ($2 ~ /^ctr-/) ; next }
+    inb && inctr && $1 == "User"                 { print $2; exit }
+  ' "$SSH_CONFIG" 2>/dev/null
+}
+
 alias_of() {
   a=$(cubby_alias_of "$1")
   [ -n "$a" ] || die "host '$1' is not registered (cubby add-host $1 ...)"
@@ -241,6 +251,9 @@ cmd_add_host() {
   tmp=$(mktemp)
   trap 'rm -f "$blk" "$tmp" "$tmp.out"' EXIT
   gpu_state=$(cubby_gpu_of "$id")
+  # コンテナのログインユーザー＝ホストのログインユーザー。最後に setup-host.sh の結果で確定する。
+  # それまでは --user か、前回の管理ブロックの値を使う。
+  ctr_user=${user:-$(ctr_user_of "$id")}
   gen_block > "$blk"
   write_block "$id" "$blk"
   log "updated the cubby block for $id at the top of $SSH_CONFIG (backup: $SSH_CONFIG.cubby.bak)"
@@ -258,7 +271,7 @@ gen_block() {
     echo "# managed by cubby (cubby add-host $id). Edits inside this block are overwritten."
     echo "# コンテナ: ssh ctr-<作業名>.$id（GPU なし） / ssh gpu-<作業名>.$id（GPU あり。gpu=yes のホストのみ）"
     echo "Host ctr-*.$id gpu-*.$id"
-    echo "  User dev"
+    [ -n "$ctr_user" ] && echo "  User $ctr_user"
     echo "  ProxyCommand $proxy_ssh $alias_name $REMOTE_BIN/ctr-connect %n"
     echo "  HostKeyAlias cubby-$id"
     [ "$CUSTOM_DIR" = 1 ] && echo "  UserKnownHostsFile $(cfgval "$(natpath "$KNOWN_HOSTS")")"
@@ -362,6 +375,8 @@ add_host_rest() {
   fi
 
   # GPU の有無を管理ブロックに書き直す
+  ru=$(sed -n 's/^CUBBY_USER //p' "$tmp.out" | tr -d '\r' | head -n 1)
+  [ -n "$ru" ] && ctr_user=$ru
   gpu_line=$(sed -n 's/^CUBBY_GPU //p' "$tmp.out" | tr -d '\r' | head -n 1)
   gpu_state=${gpu_line%% *}
   case "$gpu_state" in yes|no) ;; *) gpu_state=unknown ;; esac
