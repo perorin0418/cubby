@@ -1,0 +1,8 @@
+# 手元の ~/.ssh/config の「Host *」より上に追記する。
+# remote-host はリモートホストの SSH 名に、/usr/local/bin はスクリプトの設置先に置き換える。
+# 手元の OpenSSH が ProxyCommand で %n を受け付けなければ %h を使う（HostName を書かないので同じ値）。
+Host ctr-*
+  User dev
+  ProxyCommand ssh remote-host /usr/local/bin/ctr-connect %n
+  HostKeyAlias dev-containers
+  ServerAliveInterval 30

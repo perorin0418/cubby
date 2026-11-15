@@ -1,0 +1,19 @@
+#!/bin/sh
+# ctr-list : ctr-connect が管理するコンテナと、元リポジトリの worktree を一覧する。
+set -eu
+
+if [ -r /etc/ctr/config.env ]; then
+  # shellcheck disable=SC1091
+  . /etc/ctr/config.env
+fi
+REPO=${CTR_REPO:-/srv/project}
+
+echo "== containers (label ctr.managed=true) =="
+docker ps -a --filter label=ctr.managed=true \
+  --format 'table {{.Names}}\t{{.Status}}\t{{.Image}}\t{{.CreatedAt}}'
+echo
+echo "== volumes =="
+docker volume ls --format '{{.Name}}' | grep -E '^ctr-[a-z0-9][a-z0-9-]*-home$' || echo "(none)"
+echo
+echo "== worktrees ($REPO) =="
+git -C "$REPO" worktree list

@@ -1,0 +1,78 @@
+#!/bin/sh
+# ctr-connect <name>
+#
+# ~/.ssh/config の ProxyCommand から呼ばれる。接続名 <name> のコンテナと worktree を
+# 用意し（なければ作る・止まっていれば起動する）、コンテナ内の sshd と標準入出力をつなぐ。
+#
+# 重要: 標準出力は SSH の通信路そのもの。ログ・git・docker の出力は必ず標準エラー出力へ出す。
+#       また、準備中のコマンドが SSH の入力を読み取らないよう、標準入力は /dev/null にする。
+set -eu
+
+if [ -r /etc/ctr/config.env ]; then
+  # shellcheck disable=SC1091
+  . /etc/ctr/config.env
+fi
+REPO=${CTR_REPO:-/srv/project}
+WT_ROOT=${CTR_WT_ROOT:-/srv/worktrees}
+IMAGE=${CTR_IMAGE:-ctr-dev:latest}
+HOSTKEYS=${CTR_HOSTKEYS:-/etc/ctr/hostkeys}
+AUTHKEYS=${CTR_AUTHKEYS:-/etc/ctr/authorized_keys}
+LOCK_DIR=${CTR_LOCK_DIR:-/tmp/ctr-locks}
+
+log() { printf 'ctr-connect: %s\n' "$*" >&2; }
+
+# 名前の検証は case で行う（grep は改行を含む入力を行ごとに判定するため、すり抜ける）。
+# 改行は [a-z0-9-] に含まれないので 1 つ目のパターンで弾かれる。
+name=${1:-}
+case "$name" in
+  ''|*[!a-z0-9-]*) log "invalid name: $name"; exit 2 ;;
+  ctr-[a-z0-9]*)   ;;
+  *)               log "invalid name: $name"; exit 2 ;;
+esac
+[ "${#name}" -le 44 ] || { log "name too long: $name"; exit 2; }
+
+wt="$WT_ROOT/$name"
+
+# 同名の同時接続でコンテナや worktree が二重に作られないよう、名前ごとに排他する。
+mkdir -p "$LOCK_DIR"
+exec 9>"$LOCK_DIR/$name.lock"
+flock -w 60 9 || { log "lock timeout: $name"; exit 1; }
+
+if [ ! -d "$wt" ]; then
+  if git -C "$REPO" show-ref --verify --quiet "refs/heads/$name" </dev/null; then
+    log "creating worktree $wt (existing branch $name)"
+    git -C "$REPO" worktree add "$wt" "$name" </dev/null 1>&2
+  else
+    log "creating worktree $wt (new branch $name)"
+    git -C "$REPO" worktree add -b "$name" "$wt" </dev/null 1>&2
+  fi
+fi
+
+if ! docker inspect --type container "$name" </dev/null >/dev/null 2>&1; then
+  log "creating container $name"
+  docker run -d --name "$name" --hostname "$name" \
+    --label ctr.managed=true --label ctr.name="$name" \
+    --init --restart unless-stopped \
+    -v "$name-home:/home/dev" \
+    -v "$REPO/.git:$REPO/.git" \
+    -v "$wt:$wt" \
+    -v "$HOSTKEYS:/etc/ssh/ctr-hostkeys:ro" \
+    -v "$AUTHKEYS:/etc/ssh/ctr-authorized_keys:ro" \
+    -w "$wt" \
+    "$IMAGE" </dev/null >/dev/null
+elif [ "$(docker inspect --type container -f '{{.State.Running}}' "$name" </dev/null)" != true ]; then
+  log "starting container $name"
+  docker start "$name" </dev/null >/dev/null
+fi
+
+# コンテナ内の sshd が応答するまで最大 15 秒（0.25 秒 x 60 回）待つ。
+i=0
+until docker exec "$name" nc -z 127.0.0.1 22 </dev/null >/dev/null 2>&1; do
+  i=$((i + 1))
+  [ "$i" -ge 60 ] && { log "sshd not ready: $name"; exit 1; }
+  sleep 0.25
+done
+
+# ロックを閉じてから繋ぐ。閉じ忘れるとセッション中ずっとロックを持ち、同名の 2 本目が待たされる。
+exec 9>&-
+exec docker exec -i "$name" nc 127.0.0.1 22

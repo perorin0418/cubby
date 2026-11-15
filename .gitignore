@@ -1,0 +1,6 @@
+# 実値の設定・鍵はコミットしない
+config.env
+*.key
+*_key
+*_key.pub
+id_*

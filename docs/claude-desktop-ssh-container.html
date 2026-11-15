@@ -1,0 +1,221 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Claude Desktop → SSH → 接続名ごとに別コンテナで Claude Code を動かす構成</title>
+<style>
+:root {
+  color-scheme: light;
+  --bg: #f6f8f9; --text: #1d2a33; --muted: #5b6b76; --line: #9fb0bb; --box: #ffffff;
+  --pc: #e3ecf7;   --pc-edge: #4a6fa5;
+  --host: #e6f2ee; --host-edge: #3f8a72;
+  --c1: #fdf3e1;   --c1-edge: #b07a1e;
+  --c2: #f7e8ee;   --c2-edge: #a8486e;
+  --api: #efe9f6;  --api-edge: #7458a6;
+  --ssh: #2f6fb0;  --vol: #8a6a2e;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    color-scheme: dark;
+    --bg: #151b20; --text: #e2e8ec; --muted: #9aa8b2; --line: #5c6c77; --box: #222b31;
+    --pc: #1d2a3a;   --pc-edge: #7ea3d6;
+    --host: #1a2d27; --host-edge: #6fbf9f;
+    --c1: #33291a;   --c1-edge: #e0ac55;
+    --c2: #35202a;   --c2-edge: #e08aae;
+    --api: #2a2238;  --api-edge: #a990d6;
+    --ssh: #7fb2e8;  --vol: #d6b06a;
+  }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--text);
+  font-family: "Hiragino Sans", "Noto Sans JP", "Yu Gothic UI", "Meiryo", sans-serif; line-height: 1.75; }
+main { max-width: 1060px; margin: 0 auto; padding: 32px 20px 56px; }
+h1 { font-size: 1.45rem; line-height: 1.4; margin: 0 0 16px; }
+h2 { font-size: 1.1rem; margin: 36px 0 8px; }
+p, li { max-width: 46em; }
+.figure { overflow-x: auto; margin: 20px 0 8px; }
+svg { display: block; min-width: 880px; width: 100%; height: auto; }
+.cap { color: var(--muted); font-size: .9rem; }
+code { font-family: "SFMono-Regular", Consolas, monospace; font-size: .92em; }
+ol li, ul li { margin-bottom: 6px; }
+
+.zone-pc   { fill: var(--pc);   stroke: var(--pc-edge);   stroke-width: 2; }
+.zone-host { fill: var(--host); stroke: var(--host-edge); stroke-width: 2; }
+.zone-c1   { fill: var(--c1);   stroke: var(--c1-edge);   stroke-width: 2; }
+.zone-c2   { fill: var(--c2);   stroke: var(--c2-edge);   stroke-width: 2; }
+.zone-api  { fill: var(--api);  stroke: var(--api-edge);  stroke-width: 2; }
+.box { fill: var(--box); stroke: var(--line); stroke-width: 1.2; }
+.box-c1 { fill: var(--box); stroke: var(--c1-edge); stroke-width: 1.4; }
+.box-c2 { fill: var(--box); stroke: var(--c2-edge); stroke-width: 1.4; }
+.t  { fill: var(--text); font-size: 14px; }
+.tb { fill: var(--text); font-size: 14.5px; font-weight: 700; }
+.tz { font-size: 16px; font-weight: 700; }
+.tm { fill: var(--muted); font-size: 12.5px; }
+.zt-pc { fill: var(--pc-edge); } .zt-host { fill: var(--host-edge); }
+.zt-c1 { fill: var(--c1-edge); } .zt-c2 { fill: var(--c2-edge); } .zt-api { fill: var(--api-edge); }
+.dot-c1 { fill: var(--c1-edge); } .dot-c2 { fill: var(--c2-edge); }
+.ssh { stroke: var(--ssh); stroke-width: 2.6; fill: none; }
+.vol { stroke: var(--vol); stroke-width: 1.8; fill: none; stroke-dasharray: 6 4; }
+.wt  { stroke: var(--muted); stroke-width: 1.2; fill: none; }
+.api { stroke: var(--api-edge); stroke-width: 2; fill: none; stroke-dasharray: 2 4; }
+.num { fill: var(--ssh); }
+.num-t { fill: #fff; font-size: 13px; font-weight: 700; }
+</style>
+</head>
+<body>
+<main>
+<h1>接続名ごとに別のコンテナで Claude Code を動かす構成</h1>
+
+<p>結論：Desktop に登録する SSH 接続の名前を、そのままコンテナ名として使います。名前が同じなら何度つないでも同じコンテナに戻り、名前が違えば別のコンテナになります。新しいコンテナがほしいときは、Desktop に新しい名前の接続を追加するだけです。</p>
+
+<p>この対応づけは、手元の ~/.ssh/config に書く ProxyCommand で実現します。ProxyCommand は「SSH の通信路として、指定したコマンドの標準入出力を使う」という OpenSSH の設定です。ここではリモートホスト上のスクリプト ctr-connect を呼び、接続名のコンテナを用意したうえで、そのコンテナ内の sshd（SSH の接続を受け付けるサーバープログラム）につなぎます。</p>
+
+<div class="figure">
+<svg viewBox="0 0 1000 680" role="img" aria-labelledby="figtitle">
+  <title id="figtitle">接続名ごとに別コンテナへSSH接続する構成図</title>
+  <defs>
+    <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="var(--ssh)"/></marker>
+    <marker id="ahv" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="var(--vol)"/></marker>
+    <marker id="aha" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="var(--api-edge)"/></marker>
+  </defs>
+
+  <!-- 手元PC -->
+  <rect class="zone-pc" x="16" y="40" width="250" height="420" rx="10"/>
+  <text class="tz zt-pc" x="32" y="68">手元のPC</text>
+  <rect class="box" x="36" y="80" width="210" height="150" rx="6"/>
+  <text class="tb" x="50" y="106">Claude Desktop</text>
+  <text class="tm" x="50" y="130">登録した SSH 接続</text>
+  <circle class="dot-c1" cx="58" cy="149" r="5"/><text class="t" x="70" y="154">ctr-feature1</text>
+  <circle class="dot-c2" cx="58" cy="173" r="5"/><text class="t" x="70" y="178">ctr-bugfix</text>
+  <text class="tm" x="50" y="208">名前を足すと新しいコンテナ</text>
+
+  <rect class="box" x="36" y="250" width="210" height="192" rx="6"/>
+  <text class="tb" x="50" y="276">~/.ssh/config</text>
+  <text class="tm" x="50" y="302">Host ctr-*</text>
+  <text class="tm" x="50" y="322">  User dev</text>
+  <text class="tm" x="50" y="342">  ProxyCommand ssh</text>
+  <text class="tm" x="50" y="362">    remote-host</text>
+  <text class="tm" x="50" y="382">    ctr-connect %n</text>
+  <text class="tm" x="50" y="402">  HostKeyAlias</text>
+  <text class="tm" x="50" y="422">    dev-containers</text>
+
+  <!-- API -->
+  <rect class="zone-api" x="16" y="500" width="250" height="110" rx="10"/>
+  <text class="tz zt-api" x="32" y="530">Anthropic の API</text>
+  <text class="tm" x="32" y="554">推論の要求先</text>
+  <text class="tm" x="32" y="574">認証情報は各コンテナ内に置かれる</text>
+
+  <!-- リモートホスト -->
+  <rect class="zone-host" x="310" y="20" width="674" height="640" rx="10"/>
+  <text class="tz zt-host" x="328" y="48">リモートホスト（remote-host、Linux）</text>
+
+  <rect class="box" x="330" y="70" width="170" height="60" rx="6"/>
+  <text class="tb" x="344" y="96">sshd :22</text>
+  <text class="tm" x="344" y="118">ホストへのログイン</text>
+
+  <rect class="box" x="330" y="180" width="190" height="210" rx="6"/>
+  <text class="tb" x="344" y="206">ctr-connect %n</text>
+  <text class="tm" x="344" y="232">コンテナがなければ作る</text>
+  <text class="tm" x="344" y="252">（worktree も作る）</text>
+  <text class="tm" x="344" y="276">止まっていれば起動する</text>
+  <text class="tm" x="344" y="300">sshd の起動を待つ</text>
+  <text class="tm" x="344" y="324">docker exec -i で</text>
+  <text class="tm" x="344" y="344">コンテナ内の sshd に</text>
+  <text class="tm" x="344" y="364">標準入出力をつなぐ</text>
+
+  <!-- コンテナ1 -->
+  <rect class="zone-c1" x="540" y="70" width="206" height="220" rx="10"/>
+  <text class="tz zt-c1" x="554" y="96">ctr-feature1</text>
+  <rect class="box-c1" x="556" y="108" width="100" height="40" rx="6"/>
+  <text class="tb" x="568" y="133">sshd :22</text>
+  <rect class="box-c1" x="556" y="176" width="174" height="98" rx="6"/>
+  <text class="tb" x="568" y="200">Claude Code 本体</text>
+  <text class="tm" x="568" y="222">~/.claude/remote/</text>
+  <text class="tm" x="568" y="242">作業先 /srv/worktrees/</text>
+  <text class="tm" x="568" y="262">  ctr-feature1</text>
+
+  <!-- コンテナ2 -->
+  <rect class="zone-c2" x="762" y="70" width="206" height="220" rx="10"/>
+  <text class="tz zt-c2" x="776" y="96">ctr-bugfix</text>
+  <rect class="box-c2" x="778" y="108" width="100" height="40" rx="6"/>
+  <text class="tb" x="790" y="133">sshd :22</text>
+  <rect class="box-c2" x="778" y="176" width="174" height="98" rx="6"/>
+  <text class="tb" x="790" y="200">Claude Code 本体</text>
+  <text class="tm" x="790" y="222">~/.claude/remote/</text>
+  <text class="tm" x="790" y="242">作業先 /srv/worktrees/</text>
+  <text class="tm" x="790" y="262">  ctr-bugfix</text>
+
+  <!-- ホスト上のデータ -->
+  <text class="tm" x="540" y="326">ホスト上のデータ（コンテナごとに分離）</text>
+  <rect class="box-c1" x="540" y="345" width="150" height="56" rx="6"/>
+  <text class="tb" x="552" y="369">ctr-feature1-home</text>
+  <text class="tm" x="552" y="390">→ /home/dev</text>
+  <rect class="box-c1" x="540" y="415" width="206" height="56" rx="6"/>
+  <text class="tb" x="552" y="439">worktrees/ctr-feature1</text>
+  <text class="tm" x="552" y="460">→ 同じパスでマウント</text>
+
+  <rect class="box-c2" x="762" y="345" width="150" height="56" rx="6"/>
+  <text class="tb" x="774" y="369">ctr-bugfix-home</text>
+  <text class="tm" x="774" y="390">→ /home/dev</text>
+  <rect class="box-c2" x="762" y="415" width="206" height="56" rx="6"/>
+  <text class="tb" x="774" y="439">worktrees/ctr-bugfix</text>
+  <text class="tm" x="774" y="460">→ 同じパスでマウント</text>
+
+  <rect class="box" x="540" y="510" width="428" height="72" rx="6"/>
+  <text class="tb" x="554" y="536">/srv/project（元のリポジトリ）</text>
+  <text class="tm" x="554" y="560">全コンテナに同じパスでマウント。各 worktree の元になる</text>
+
+  <!-- マウント -->
+  <path class="vol" d="M615,345 L615,292" marker-end="url(#ahv)"/>
+  <path class="vol" d="M725,415 L725,292" marker-end="url(#ahv)"/>
+  <path class="vol" d="M837,345 L837,292" marker-end="url(#ahv)"/>
+  <path class="vol" d="M947,415 L947,292" marker-end="url(#ahv)"/>
+  <path class="wt" d="M643,510 L643,471"/>
+  <path class="wt" d="M865,510 L865,471"/>
+  <text class="tm" x="652" y="496">worktree</text>
+  <text class="tm" x="874" y="496">worktree</text>
+
+  <!-- SSH 経路 -->
+  <path class="ssh" d="M246,140 L330,104" marker-end="url(#ah)"/>
+  <circle class="num" cx="282" cy="108" r="11"/><text class="num-t" x="278" y="113">1</text>
+  <path class="ssh" d="M415,130 L415,180" marker-end="url(#ah)"/>
+  <circle class="num" cx="436" cy="155" r="11"/><text class="num-t" x="432" y="160">2</text>
+  <path class="ssh" d="M520,214 L556,140" marker-end="url(#ah)"/>
+  <path class="ssh" d="M520,300 L532,300 L532,60 L828,60 L828,108" marker-end="url(#ah)"/>
+  <circle class="num" cx="532" cy="252" r="11"/><text class="num-t" x="528" y="257">3</text>
+  <path class="ssh" d="M606,148 L606,176" marker-end="url(#ah)"/>
+  <circle class="num" cx="630" cy="162" r="11"/><text class="num-t" x="626" y="167">4</text>
+  <path class="ssh" d="M828,148 L828,176" marker-end="url(#ah)"/>
+  <circle class="num" cx="852" cy="162" r="11"/><text class="num-t" x="848" y="167">4</text>
+
+  <!-- API 通信 -->
+  <path class="api" d="M540,280 L524,280 L524,620 L290,620 L290,560 L266,560" marker-end="url(#aha)"/>
+  <text class="tm" x="330" y="644">各コンテナの本体が直接アクセスする</text>
+</svg>
+</div>
+<p class="cap">青い実線が SSH の経路、茶色の破線がマウント、紫の点線が推論の通信です。灰色の細線は「この worktree はこのリポジトリから作った」という関係を表します。色はコンテナごとに分けています。丸数字は次の節の手順番号に対応します。</p>
+
+<h2>接続の流れ</h2>
+<ol>
+  <li>Desktop で接続（例 ctr-feature1）を選ぶと、手元の OpenSSH が ~/.ssh/config の <code>Host ctr-*</code> の設定を当てはめます。ProxyCommand に従い、まず remote-host に SSH でログインします。</li>
+  <li>remote-host 上で <code>ctr-connect ctr-feature1</code> が実行されます。<code>%n</code> は接続時に指定した名前に置き換わる記号です。スクリプトは ctr-feature1 という名前のコンテナがなければ作り、止まっていれば起動します。</li>
+  <li>スクリプトは <code>docker exec -i ctr-feature1 nc localhost 22</code> で、コンテナ内の sshd と標準入出力をつなぎます。nc（netcat）は、標準入出力とネットワーク接続を中継するコマンドです。ポートを外部に公開しないので、コンテナを何個作ってもポートの割り当ては要りません。</li>
+  <li>コンテナに dev ユーザーでログインできたら、Desktop がそのコンテナの ~/.claude/remote/ に Claude Code 本体を置いて起動します。別の名前（例 ctr-bugfix）で接続すれば、同じ流れで別のコンテナが使われます。</li>
+</ol>
+
+<h2>ホスト上のデータの分け方</h2>
+<p>/home/dev はコンテナごとのボリューム（例 ctr-feature1-home）に保存します。コンテナを作り直しても、Claude Code 本体やセッションの記録が残ります。</p>
+<p>作業ディレクトリは git worktree（1つのリポジトリから作業ディレクトリを複数作る機能）で、コンテナごとに /srv/worktrees/&lt;名前&gt; を作ります。worktree の中の .git ファイルは元リポジトリの絶対パスを指しています。そのため、元リポジトリ /srv/project と各 worktree を、ホストと同じパスでコンテナにマウントします。</p>
+
+<h2>押さえておく点</h2>
+<ul>
+  <li>全コンテナに同じホスト鍵をイメージで焼き込みます。ホスト鍵は、接続先が前回と同じ相手かを確かめるための鍵です。手元では HostKeyAlias（照合に使う名前を固定する設定）で dev-containers にまとめるので、known_hosts の記録は1つで済みます。</li>
+  <li>イメージには sshd、nc、dev ユーザーの公開鍵を入れておきます。</li>
+  <li>remote-host のログインユーザーは docker を実行できる必要があります。docker グループは実質 root と同じ権限なので、共用ホストでは扱いに注意します。</li>
+  <li>Desktop がパターン指定（<code>Host ctr-*</code>）と ProxyCommand を想定どおり適用するかは未検証です。先にターミナルで <code>ssh ctr-test</code> が通ることを確かめてから、Desktop に登録します。Windows 版の Desktop は内蔵の SSH クライアントを使い、ProxyCommand の実行に Git for Windows の sh が必要です。</li>
+  <li>使い終わったコンテナは自動では消えません。<code>docker rm -f</code>、<code>docker volume rm</code>、<code>git worktree remove</code> で片付けます。</li>
+</ul>
+</main>
+</body>
+</html>
