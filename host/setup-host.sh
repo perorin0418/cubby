@@ -27,9 +27,14 @@ warn() { printf 'setup-host: WARNING: %s\n' "$*" >&2; }
 die()  { printf 'setup-host: ERROR: %s\n' "$*" >&2; exit 1; }
 
 id_arg= repo_arg= repo_url= wt_arg= pubkeys= rebuild=0 gpu_mode=auto
+add_mounts= del_mounts=
+nl='
+'
 while [ $# -gt 0 ]; do
   case "$1" in
     --gpu)       gpu_mode=$2; shift 2 ;;
+    --mount)     add_mounts="$add_mounts$2$nl"; shift 2 ;;
+    --unmount)   del_mounts="$del_mounts$2$nl"; shift 2 ;;
     --id)        id_arg=$2; shift 2 ;;
     --repo)      repo_arg=$2; shift 2 ;;
     --repo-url)  repo_url=$2; shift 2 ;;
@@ -129,10 +134,47 @@ fi
 
 # スクリプト
 mkdir -p "$BIN_DIR"
-for f in ctr-connect ctr-list ctr-remove; do
-  cp "$here/bin/$f" "$BIN_DIR/$f.tmp" && chmod 755 "$BIN_DIR/$f.tmp" && mv -f "$BIN_DIR/$f.tmp" "$BIN_DIR/$f"
+for f in ctr-connect ctr-list ctr-remove ctr-recreate ctr-common.sh; do
+  mode=755; case "$f" in *.sh) mode=644 ;; esac
+  cp "$here/bin/$f" "$BIN_DIR/$f.tmp" && chmod "$mode" "$BIN_DIR/$f.tmp" && mv -f "$BIN_DIR/$f.tmp" "$BIN_DIR/$f"
 done
-log "installed ctr-connect ctr-list ctr-remove to $BIN_DIR"
+log "installed ctr-connect ctr-list ctr-remove ctr-recreate to $BIN_DIR"
+
+# 追加マウント（~/.config/cubby/mounts）。--mount は同じホストのパスの行を置き換えて追記、
+# --unmount はそのホストのパスの行を消す。手で書いた他の行やコメントは残す。
+# shellcheck source=bin/ctr-common.sh
+. "$here/bin/ctr-common.sh"
+MOUNTS=${CTR_MOUNTS_FILE:-$CONF_DIR/mounts}
+if [ ! -e "$MOUNTS" ]; then
+  cat > "$MOUNTS" <<'EOF'
+# cubby: このホストの全コンテナに毎回マウントするディレクトリ（1 行に 1 つ）
+#   ホストのパス[:コンテナ内のパス][:ro|rw]     省略時はホストと同じパス、rw
+# 例:
+#   /data/datasets:/datasets:ro
+#   /scratch
+# 変更を既存のコンテナに反映するには: ctr-recreate <名前>
+EOF
+fi
+# ホストのパスが一致する行（コメント以外）を消す
+drop_mount_line() {
+  awk -v src="$1" '
+    { l = $0; sub(/^[ \t]+/, "", l) }
+    l !~ /^#/ && l != "" { split(l, f, ":"); if (f[1] == src) next }
+    { print }' "$MOUNTS" > "$MOUNTS.tmp" && mv -f "$MOUNTS.tmp" "$MOUNTS"
+}
+printf '%s' "$del_mounts" | while IFS= read -r m; do
+  [ -n "$m" ] || continue
+  drop_mount_line "${m%%:*}"
+  log "mounts: removed $m"
+done
+printf '%s' "$add_mounts" | while IFS= read -r m; do
+  [ -n "$m" ] || continue
+  spec=$(ctr_parse_mount "$m") || die "invalid --mount '$m' (HOST_PATH[:CONTAINER_PATH][:ro|rw], absolute paths)"
+  drop_mount_line "${spec%%:*}"
+  printf '%s\n' "$m" >> "$MOUNTS"
+  [ -e "${spec%%:*}" ] || warn "mount source ${spec%%:*} does not exist on this host yet (it is skipped until it exists)"
+  log "mounts: $spec"
+done
 
 # rootless Podman の確認
 [ "$(podman info --format '{{.Host.Security.Rootless}}' 2>/dev/null)" = true ] \
@@ -198,6 +240,14 @@ fi
   echo "CTR_GPU_AVAILABLE=$gpu_avail"
   echo "CTR_GPU_INFO='$(printf '%s' "$gpu_info" | tr -d "'")'"
 } > "$CONF_DIR/detected.env"
+
+# マウントの設定が変わったのに作り直していないコンテナを知らせる
+sig=$(ctr_mount_sig)
+outdated=
+for c in $(podman ps -a --filter label=ctr.managed=true --format '{{.Names}}' 2>/dev/null); do
+  [ "$(ctr_container_sig "$c")" = "$sig" ] || outdated="$outdated $c"
+done
+[ -z "$outdated" ] || warn "containers created with older mount settings:$outdated (apply with: ctr-recreate <name>)"
 
 log "done (host id: ${CTR_HOST_ID:-unset})"
 printf 'CUBBY_GPU %s %s\n' "$gpu_avail" "$gpu_info"

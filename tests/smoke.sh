@@ -142,6 +142,28 @@ else
   ng "11 reconnect after podman rm -f (home marker missing or connect failed)"
 fi
 
+# M. 追加マウント（ホストの ~/.config/cubby/mounts）。設定は変えず、設定済みのものを確かめる
+specs=$(remote 'CONF_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/cubby"; . .local/bin/ctr-common.sh && ctr_mount_specs quiet' 2>/dev/null | tr -d '\r')
+if [ -z "$specs" ]; then
+  sk "M1 no extra mounts configured on $REMOTE (cubby add-host $ID --mount ...)"
+else
+  m_ok=1
+  # パスに空白を含むことがあるので、1 行ずつ読む
+  while IFS= read -r spec; do
+    [ -n "$spec" ] || continue
+    dst=${spec%:*}; dst=${dst#*:}; mode=${spec##*:}
+    if ! cssh "test -e '$dst'" >/dev/null 2>&1; then m_ok=0; info "$dst is not visible in $NAME"; continue; fi
+    if [ "$mode" = ro ] && cssh "touch '$dst/.ctr-smoke-ro' 2>/dev/null" >/dev/null 2>&1; then
+      m_ok=0; info "$dst is writable although mounted ro"
+      cssh "rm -f '$dst/.ctr-smoke-ro'" >/dev/null 2>&1
+    fi
+  done <<EOF
+$specs
+EOF
+  [ "$m_ok" = 1 ] && ok "M1 extra mounts are visible in $NAME ($(printf '%s\n' "$specs" | wc -l | tr -d ' ') mount(s), ro enforced)" \
+                  || ng "M1 extra mounts"
+fi
+
 # 12. ctr-remove: 未コミットがあれば止まる
 remote "echo x > '$WT/ctr-smoke-untracked'"
 remote "$RBIN/ctr-remove -y $NAME" >/dev/null 2>&1

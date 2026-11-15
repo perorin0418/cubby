@@ -15,6 +15,8 @@ if [ -r "$CONF_DIR/detected.env" ]; then
   # shellcheck disable=SC1091
   . "$CONF_DIR/detected.env"
 fi
+# shellcheck source=bin/ctr-common.sh
+. "$(dirname "$0")/ctr-common.sh"
 
 echo "== host: ${CTR_HOST_ID:-$(hostname)}  gpu: ${CTR_GPU_AVAILABLE}${CTR_GPU_INFO:+ ($CTR_GPU_INFO)} =="
 echo "== containers (label ctr.managed=true) =="
@@ -23,6 +25,19 @@ podman ps -a --filter label=ctr.managed=true \
 echo
 echo "== volumes =="
 podman volume ls --format '{{.Name}}' | grep -E '^(ctr|gpu)-[a-z0-9][a-z0-9-]*-home$' || echo "(none)"
+echo
+echo "== extra mounts (${CTR_MOUNTS_FILE:-$CONF_DIR/mounts}) =="
+specs=$(ctr_mount_specs 2>&1)
+if [ -n "$specs" ]; then printf '%s\n' "$specs" | sed 's/^/  /'; else echo "  (none)"; fi
+sig=$(ctr_mount_sig)
+outdated=
+for c in $(podman ps -a --filter label=ctr.managed=true --format '{{.Names}}'); do
+  [ "$(ctr_container_sig "$c")" = "$sig" ] || outdated="$outdated $c"
+done
+if [ -n "$outdated" ]; then
+  echo "  containers created with older mount settings:$outdated"
+  echo "  (apply with: ctr-recreate <name>)"
+fi
 echo
 echo "== worktrees ($REPO) =="
 git -C "$REPO" worktree list

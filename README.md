@@ -53,6 +53,8 @@ host/bootstrap-root.sh  root が要るホストの準備（cubby add-host が必
 bin/ctr-connect         ProxyCommand から呼ばれる本体（ホスト側）
 bin/ctr-list            コンテナ・ボリューム・worktree の一覧（ホスト側）
 bin/ctr-remove          片付け（ホスト側）
+bin/ctr-recreate        コンテナだけを作り直す（マウントの設定の反映。ホスト側）
+bin/ctr-common.sh       ホスト側のスクリプトが共有する部分（追加マウントの解釈）
 host/setup-host.sh      ホストの準備（cubby add-host が自動で実行する）
 host/preflight.sh       ホストの事前確認（変更しない）
 image/                  コンテナイメージ（sshd, nc, git, dev ユーザー）
@@ -174,6 +176,33 @@ sh client/cubby hosts
 - コンテナにはホストのドライバのライブラリと `nvidia-smi` が入ります。CUDA Toolkit は入れていないので、PyTorch など CUDA を同梱するパッケージを使うか、コンテナ内で入れてください。
 - **AMD の GPU** は自動では準備しません。ホストの `~/.config/cubby/config.env` に `CTR_GPU_ARGS="--device /dev/kfd --device /dev/dri --group-add keep-groups"` のように書いて `cubby add-host` を再実行すると、その指定で起動できるかを確かめ、`gpu-` の接続で使えるようになります。
 
+## ホストのディレクトリを毎回マウントする
+
+データセットやキャッシュなど、ホストのディレクトリを**そのホストの全コンテナ**（`ctr-` も `gpu-` も）に毎回マウントできます。
+
+```sh
+# 手元から設定する（何度でも。--mount / --unmount は複数指定できる）
+sh client/cubby add-host lab1 --mount /data/datasets:/datasets:ro --mount /scratch
+sh client/cubby add-host lab1 --unmount /scratch
+```
+
+書式は `ホストのパス[:コンテナ内のパス][:ro|rw]` です。コンテナ内のパスを省略するとホストと同じパスに、モードを省略すると `rw` になります。書き換えたくないものには `:ro` を付けてください。
+
+設定はホストの `~/.config/cubby/mounts` に 1 行ずつ保存されます。直接編集してもかまいません（空白を含むパスは直接編集で書けます。`:` を含むパスは書けません）。
+
+```
+# ~/.config/cubby/mounts
+/data/datasets:/datasets:ro
+/scratch
+/home/alice/.cache/huggingface:/home/dev/.cache/huggingface
+```
+
+- **既存のコンテナへの反映**: マウントはコンテナを作るときに決まります。設定を変えたら、ホストで `ctr-recreate <名前>` を実行してください。コンテナだけを作り直し、ホーム・worktree・ブランチは残ります（動いている Claude Code のセッションは止まりますが、記録はホームに残ります）。次の接続で新しい設定のコンテナが作られます。
+- 反映していないコンテナは、`add-host` の出力・`ctr-list`（`cubby list`）・接続時のメッセージで知らせます。接続時に自動で作り直すことはしません（セッションが切れるため）。
+- ホストにないディレクトリは、警告を出して飛ばします（接続は失敗させません）。後から作られたら、`ctr-recreate` で反映できます。
+- rootless なので、コンテナから書けるのはホストのログインユーザーが書けるファイルだけです。コンテナで作ったファイルはホストではログインユーザーの所有になります。
+- `/etc`・`/usr`・`/home/dev` そのものなど、コンテナの動作に必要な場所にはマウントできません（`/home/dev/.cache/...` のような下の階層はできます）。
+
 ## 片付け
 
 ホスト上で実行します（`ssh lab1` してから）。
@@ -208,6 +237,8 @@ Desktop での確認（セッションがコンテナ内で動く・再起動後
 | `key authentication still fails` | ホストの `~`・`~/.ssh` の権限（グループや他人が書けると sshd が鍵を無視する）。鍵にパスフレーズがあるなら ssh-agent に登録されているか |
 | `accepts only public keys` | ホストがパスワード認証を許可していない。最初の鍵の登録だけ別の手段で行う |
 | `this host has no usable GPU` | `cubby hosts` の `gpu=`。ホストで `nvidia-smi` が通るか（ドライバ）。通るなら `cubby add-host` を再実行 |
+| コンテナにマウントが見えない | `ctr-list` の extra mounts（ホストにないパスは飛ばされる）。設定を変えた後なら `ctr-recreate <名前>` |
+| `mount settings changed since ...` | マウントの設定が変わった。反映するならホストで `ctr-recreate <名前>` |
 | `gpu=no` なのに GPU がある | ドライバの更新後なら `cubby add-host` の再実行で CDI の定義を作り直す。`add-host` の出力の `WARNING`（toolkit の導入や `nvidia-ctk cdi generate` の失敗） |
 | `ssh ctr-x.<id>` が `kex_exchange_identification` などで即切れる | `ssh <host> '.local/bin/ctr-connect ctr-x.<id> </dev/null \| head -c 8'` が `SSH-2.0-` を返すか。標準エラー出力の `ctr-connect:` のメッセージ |
 | `invalid name` / `host id mismatch` | 接続名が `ctr-<作業名>.<ホストID>` の形か。ホスト ID はホストの `~/.config/cubby/config.env` の `CTR_HOST_ID` |
@@ -242,6 +273,7 @@ Desktop での確認（セッションがコンテナ内で動く・再起動後
 | ホストの事前準備（docker・git の導入、ディレクトリ作成）は手作業 | `cubby add-host` が必要なときだけ sudo で自動実行（`host/bootstrap-root.sh`） | 利用者の要望 |
 | ホストへのログインは鍵認証が前提 | パスワード認証のホストでも、`add-host` が初回に公開鍵を登録する | 利用者の要望 |
 | GPU の扱いなし | 接続名 `gpu-<作業名>` で GPU 付きコンテナ（CDI `nvidia.com/gpu=all`）。NVIDIA Container Toolkit と CDI の定義を自動で準備し、使えるホストかを自動判定 | 利用者の要望 |
+| マウントは repo の `.git`・worktree・ホーム・鍵のみ | ホストごとの `~/.config/cubby/mounts` で任意のディレクトリを全コンテナにマウント。`cubby add-host --mount/--unmount`、反映は `ctr-recreate` | 利用者の要望 |
 | — | `~/.ssh/config` の書き換えを mkdir のロックで排他する | 複数の `add-host` を同時に動かすと互いのブロックを上書きしたため（検証で判明） |
 | `docker run --init` | イメージに tini を入れて PID 1 にする | ホストの catatonit の有無に依存しないため |
 | 手元は macOS・Linux の OpenSSH 前提、`~/.ssh/config` に手で追記 | Windows・macOS・Linux に対応。`~/.ssh/config` の先頭に管理ブロックを書く（`Include` は使わない）。ProxyCommand は絶対パス。Windows は Windows 標準の OpenSSH を使う | 利用者の要望。GUI から起動した Desktop の PATH が最小限のため |

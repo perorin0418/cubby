@@ -18,6 +18,11 @@
 #       --worktrees PATH    ホストの worktree の置き場（既定 /srv/worktrees）
 #       --rebuild           コンテナイメージを作り直す
 #       --no-gpu            GPU の準備（NVIDIA Container Toolkit の導入など）をしない
+#       --mount SPEC        ホストの全コンテナに毎回マウントするディレクトリを足す（複数可）
+#                           SPEC は ホストのパス[:コンテナ内のパス][:ro|rw]（省略時は同じパス・rw）
+#                           例 --mount /data/datasets:/datasets:ro --mount /scratch
+#       --unmount PATH      そのホストのパスのマウントをやめる（複数可）
+#                           ※既存のコンテナへの反映はホストで ctr-recreate <名前>
 #       --replace-hostkey   known_hosts の既存のホスト鍵と違っても置き換える
 #   cubby hosts                     登録済みのホストを一覧する
 #   cubby list [id...]              各ホストのコンテナ・worktree を一覧する（既定: 全ホスト）
@@ -176,7 +181,7 @@ ensure_key_auth() {
 cmd_add_host() {
   id=${1:-}; [ $# -gt 0 ] && shift
   valid_id "$id" || die "invalid id '$id' (lowercase letters, digits and '-', up to 32 chars)"
-  alias_name=$id hostname= user= port= cloudflared=0 identity= key= repo= repo_url= wt= rebuild=0 replace=0 gpu_mode=auto
+  alias_name=$id hostname= user= port= cloudflared=0 identity= key= repo= repo_url= wt= rebuild=0 replace=0 gpu_mode=auto mount_args=
   while [ $# -gt 0 ]; do
     case "$1" in
       --hostname)        hostname=$2; shift 2 ;;
@@ -192,6 +197,8 @@ cmd_add_host() {
       --rebuild)         rebuild=1; shift ;;
       --replace-hostkey) replace=1; shift ;;
       --no-gpu)          gpu_mode=off; shift ;;
+      --mount)           no_quote mount "$2"; mount_args="$mount_args --mount $2"; shift 2 ;;
+      --unmount)         no_quote unmount "$2"; mount_args="$mount_args --unmount $2"; shift 2 ;;
       *) die "unknown option: $1" ;;
     esac
   done
@@ -321,7 +328,7 @@ add_host_rest() {
     | rssh "$alias_name" "mkdir -p $REMOTE_SHARE && tar -xf - -C $REMOTE_SHARE"
 
   find_pubkeys "$key" > "$tmp"
-  args="--id $id --pubkeys - --repo $repo --worktrees $wt --gpu $gpu_mode"
+  args="--id $id --pubkeys - --repo $repo --worktrees $wt --gpu $gpu_mode$mount_args"
   fwd=
   if [ -n "$repo_url" ]; then
     args="$args --repo-url $repo_url"

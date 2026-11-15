@@ -1,0 +1,50 @@
+#!/bin/sh
+# ctr-recreate [-y] <ctr|gpu>-<work>[.<host-id>]
+#
+# コンテナだけを作り直す（次の接続で、今の設定＝追加マウントなどで作られる）。
+# ホーム（ボリューム）・worktree・ブランチはそのまま残る。
+# 動いている Claude Code のセッションは止まる（記録はホームに残る）。
+set -eu
+
+CONF=${CTR_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/cubby/config.env}
+if [ -r "$CONF" ]; then
+  # shellcheck disable=SC1090
+  . "$CONF"
+fi
+CONF_DIR=$(dirname "$CONF")
+# shellcheck source=bin/ctr-common.sh
+. "$(dirname "$0")/ctr-common.sh"
+
+log() { printf 'ctr-recreate: %s\n' "$*" >&2; }
+usage() { echo "usage: ctr-recreate [-y] <name>" >&2; exit 2; }
+
+yes=0 name=
+for arg in "$@"; do
+  case "$arg" in
+    -y|--yes) yes=1 ;;
+    -*)       usage ;;
+    *)        [ -z "$name" ] || usage; name=$arg ;;
+  esac
+done
+name=${name%%.*}
+case "$name" in
+  ''|*[!a-z0-9-]*) log "invalid name: $name"; exit 2 ;;
+  ctr-[a-z0-9]*|gpu-[a-z0-9]*) ;;
+  *)               log "invalid name: $name"; exit 2 ;;
+esac
+
+podman container exists "$name" || { log "no container named $name (it will be created on the next connect)"; exit 0; }
+
+echo "recreate container $name"
+echo "  kept:    volume $name-home, worktree, branch"
+echo "  stopped: the running Claude Code session in $name (its history stays in the home volume)"
+echo "  mounts on next connect:"
+specs=$(ctr_mount_specs)
+if [ -n "$specs" ]; then printf '%s\n' "$specs" | sed 's/^/    /'; else echo "    (none)"; fi
+if [ "$yes" = 0 ]; then
+  printf 'proceed? [y/N] ' >&2
+  read -r answer || answer=
+  case "$answer" in y|Y|yes|YES) ;; *) log "aborted"; exit 1 ;; esac
+fi
+podman rm -f "$name" >/dev/null
+log "removed container $name; reconnect (e.g. from Claude Desktop) to create it with the current settings"

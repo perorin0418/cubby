@@ -39,6 +39,8 @@ GPU_AVAILABLE=${CTR_GPU_AVAILABLE:-no}
 GPU_ARGS=${CTR_GPU_ARGS:---device nvidia.com/gpu=all}
 
 log() { printf 'ctr-connect: %s\n' "$*" >&2; }
+# shellcheck source=bin/ctr-common.sh
+. "$(dirname "$0")/ctr-common.sh"
 
 # 名前の検証は case で行う（grep は改行を含む入力を行ごとに判定するため、すり抜ける）。
 # 改行やドットは [a-z0-9-] に含まれないので弾かれる。
@@ -95,14 +97,23 @@ fi
 # label=disable    : SELinux のホストで、マウント元を再ラベルせずに読み書きできるようにする。
 # --uts/--network private : containers.conf でホストの名前空間が既定にされていても、
 #                    ホスト名を設定でき、sshd :22 がホストの sshd と衝突しないようにする。
+# 追加マウント（~/.config/cubby/mounts）。ホストにないパスは警告して飛ばす。
+mount_sig=$(ctr_mount_sig)
 if ! podman container exists "$name" </dev/null 9>&-; then
   log "creating container $name (gpu: $gpu)"
   set --
   # shellcheck disable=SC2086
   [ "$gpu" = yes ] && set -- $GPU_ARGS
+  while IFS= read -r spec; do
+    [ -n "$spec" ] || continue
+    set -- "$@" -v "$spec"
+    log "mount ${spec%:*} (${spec##*:})"
+  done <<EOF
+$(ctr_mount_specs)
+EOF
   podman run -d --name "$name" --hostname "$name" \
     --label ctr.managed=true --label ctr.name="$name" --label ctr.gpu="$gpu" \
-    "$@" \
+    --label ctr.mounts="$mount_sig" \
     --uts=private --network=private \
     --userns=keep-id --user root \
     --security-opt label=disable \
@@ -112,11 +123,19 @@ if ! podman container exists "$name" </dev/null 9>&-; then
     -v "$wt:$wt" \
     -v "$HOSTKEYS:/etc/ssh/ctr-hostkeys:ro" \
     -v "$AUTHKEYS:/etc/ssh/ctr-authorized_keys:ro" \
+    "$@" \
     -w "$wt" \
     "$IMAGE" </dev/null >/dev/null 9>&-
-elif [ "$(podman container inspect -f '{{.State.Running}}' "$name" </dev/null 9>&-)" != true ]; then
-  log "starting container $name"
-  podman start "$name" </dev/null >/dev/null 9>&-
+else
+  # マウントの設定がコンテナを作ったときと変わっていれば知らせる（作り直しはしない。セッションが切れるため）
+  cur_sig=$(ctr_container_sig "$name" 9>&-)
+  if [ "$cur_sig" != "$mount_sig" ]; then
+    log "mount settings changed since $name was created; run 'ctr-recreate $name' on the host to apply them"
+  fi
+  if [ "$(podman container inspect -f '{{.State.Running}}' "$name" </dev/null 9>&-)" != true ]; then
+    log "starting container $name"
+    podman start "$name" </dev/null >/dev/null 9>&-
+  fi
 fi
 
 # コンテナ内の sshd が応答するまで最大 15 秒（0.25 秒 x 60 回）待つ。
