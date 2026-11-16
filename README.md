@@ -299,9 +299,9 @@ ctr-recreate ctr-feature1
 ```
 
 - 自動更新と `cubby update` は `image/` の中身（Dockerfile など）のハッシュをイメージのラベル（`cubby.image-hash`）と比べ、**変わっていれば自動で作り直します**。変わっていなければ作り直しません（`--rebuild` で強制できます）。
-- **古いイメージのコンテナは、次に接続したとき、誰もそのコンテナにつないでいなければ自動で作り直されます**（ホームと作業ディレクトリは残ります。中で続いていた Claude Code の処理は終わります）。誰かがつないでいる間は作り直さず、後の接続のときに作り直します。すぐに作り直すならホストで `ctr-recreate <名前>`、自動で作り直したくなければ `config.env` に `CTR_AUTO_RECREATE=no`。マウントの設定の変更・docker 用ソケットの有無の変化も同じ扱いです。
+- **古いイメージのコンテナは、次に接続したとき、誰もそのコンテナにつないでいなければ自動で作り直されます**（ホームと作業ディレクトリは残ります。中で続いていた Claude Code の処理は終わります）。誰かがつないでいる間は作り直さず、後の接続のときに作り直します。**Claude Desktop は SSH の接続を張ったまま使い続けます**（新しいセッションも同じ接続の上で動きます）。そのため Desktop を開いている間は自動の作り直しが起きず、Desktop を終了して開き直したときに作り直されます。待たずに作り直すなら、手元で `cubby recreate ctr-<名前>.<id>`（つないでいる Desktop のセッションは切れ、つなぎ直すと新しいコンテナになります）か、ホストで `ctr-recreate <名前>`。自動で作り直したくなければ `config.env` に `CTR_AUTO_RECREATE=no`。マウントの設定の変更・docker 用ソケットの有無の変化も同じ扱いです。
 - Dockerfile に `USER` 行やユーザーの作成は書かないでください（起動時にホストのユーザーを登録する `ctr-entrypoint` と食い違います）。
-- ベースイメージ（`debian:bookworm-slim`）は、ホストにキャッシュされたものを使います。Debian の更新を取り込みたいときは、ホストで `podman pull docker.io/library/debian:bookworm-slim` してから `cubby update <id> --rebuild` を実行します。
+- ベースイメージ（ホストの OS に合わせたもの。`ctr-list` の `container OS`）は、ホストにキャッシュされたものを使います。OS の更新を取り込みたいときは、ホストでそのイメージを `podman pull` してから `cubby update <id> --rebuild` を実行します。
 - 作り直すと古いイメージは名前のない状態（`<none>`）でホストに残ります。古いイメージのコンテナを作り直した後なら、ホストで `podman image prune` で消せます（cubby は自動では消しません）。
 
 ## ホストのディレクトリを毎回マウントする
@@ -377,6 +377,7 @@ macOS・Linux・Git Bash は `sh client/cubby ...`、Windows の PowerShell は 
 | `cubby hosts` | 登録済みのホストを一覧する（SSH 名・GPU の有無・接続名の形） |
 | `cubby list [id...]` | 各ホストのコンテナ・ボリューム・追加マウント・作業ディレクトリ（中のリポジトリの状態）を一覧する。省略時は全ホスト |
 | `cubby preflight <id>` | ホストの事前確認（何も変更しない） |
+| `cubby recreate [-y] <接続名>` | コンテナを今すぐ作り直す（例 `cubby recreate ctr-office.lab1`）。ホームと作業ディレクトリは残り、つないでいる Desktop のセッションは切れる。イメージの更新後、Desktop を開いたままで自動の作り直しが待たされるときに使う。`-y` で確認を省略 |
 | `cubby remove-host [-y] <id>` | 手元の登録（`~/.ssh/config` の cubby ブロックと known_hosts の `cubby-<id>`）だけを消す。ホスト上のものは消さない。`-y` で確認を省略 |
 
 `<id>` はホスト ID（英小文字・数字・ハイフン、32 文字以内）。接続名の末尾や ssh_config の名前に使います。
@@ -518,7 +519,8 @@ sh tests/smoke.sh <id> [--cleanup]
 | push したのに反映されない | 間隔（既定 15 分）を待つか、ホストで `ctr-sync`。`ctr-list` の `auto-update:` の行のブランチが push したブランチか |
 | コンテナ内で `docker` が `Cannot connect to the Docker daemon` | `ctr-list` の `docker in containers:`。no ならホストの systemd のユーザーセッション（`systemctl --user status podman.socket`）。yes なのに使えないなら、そのコンテナが古い（`... created without the host podman socket` と出る）ので `ctr-recreate <名前>` |
 | `docker run -v ~/...` で中身が空 | ホームの下は作業ディレクトリと `--mount` のもの以外ホストにない。作業ディレクトリの中に置く |
-| `containers still using an older image` / `the image was rebuilt since ...` | イメージを作り直した後、古いイメージのままのコンテナがある。次の接続のとき（誰もつないでいなければ）自動で作り直される。すぐなら `ctr-recreate <名前>` |
+| `containers still using an older image` / `the image was rebuilt since ...` | イメージを作り直した後、古いイメージのままのコンテナがある。次の接続のとき（誰もつないでいなければ）自動で作り直される。Desktop は接続を張ったままなので、開いている間は作り直されない。すぐなら手元で `cubby recreate ctr-<名前>.<id>` |
+| Claude が「Python がない」「dnf がない」など、入っているはずのものがないと言う | そのコンテナが古いイメージのまま（`cubby list` の `containers still using an older image`）。`cubby recreate ctr-<名前>.<id>` してつなぎ直す |
 | `cubby-task: the host podman socket is not available` | ホストの Podman の API ソケットがない（`ctr-list` の `docker in containers:`）。systemd のないホストでは作業用コンテナは使えない |
 | Claude が作業用コンテナを使わない | `~/.claude/CLAUDE.md` の cubby の区切りがあるか（コンテナの起動時に書かれる）。古いコンテナなら作り直す。Claude に「cubby-task で作業して」と伝えてもよい |
 | `mount settings changed since ...` | マウントの設定が変わった。反映するならホストで `ctr-recreate <名前>` |

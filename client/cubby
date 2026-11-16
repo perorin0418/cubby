@@ -31,6 +31,9 @@
 #   cubby list [id...]              各ホストのコンテナ・作業ディレクトリを一覧する（既定: 全ホスト）
 #   cubby preflight <id>            ホストの事前確認（何も変更しない）
 #   cubby remove-host [-y] <id>     手元の登録だけを消す（ホスト上のものは消さない）
+#   cubby recreate [-y] <接続名>    コンテナを今すぐ作り直す（例 ctr-office.lab1。ホームと作業ディレクトリは
+#                                   残る。つないでいる Claude Desktop のセッションは切れる）。Desktop は接続を
+#                                   張ったままにするので、イメージを更新した後の自動の作り直しが待たされるときに使う
 #
 # add-host がすること（ホスト側の事前準備は不要。`ssh <ホスト>` で入れて sudo が使えればよい）:
 #   0. ホストに鍵認証で入れなければ、ログインのパスワードを 1 回だけ尋ねて、手元の公開鍵を
@@ -653,6 +656,26 @@ cmd_remove_host() {
   log "removed local registration for $id"
 }
 
+cmd_recreate() {
+  yes=0
+  [ "${1:-}" = -y ] && { yes=1; shift; }
+  full=${1:-}
+  name=${full%%.*}; id=${full#*.}
+  case "$name" in *[!a-z0-9-]*) die "invalid name '$name'" ;; esac
+  case "$name" in ctr-?*|gpu-?*) ;; *) die "usage: cubby recreate [-y] <ctr-NAME.ID|gpu-NAME.ID>" ;; esac
+  [ "$id" != "$full" ] || die "usage: cubby recreate [-y] <ctr-NAME.ID|gpu-NAME.ID>"
+  a=$(alias_of "$id")
+  if [ "$yes" = 0 ]; then
+    echo "this removes container $name on $id and creates it again on the next connect."
+    echo "  kept: home volume $name-home and the work directory"
+    echo "  stopped: Claude Desktop sessions connected to $full"
+    printf 'proceed? [y/N] ' >&2
+    read -r answer || answer=
+    case "$answer" in y|Y|yes|YES) ;; *) log "aborted"; exit 1 ;; esac
+  fi
+  rssh "$a" "$REMOTE_BIN/ctr-recreate -y $name" </dev/null
+}
+
 sub=${1:-}; [ $# -gt 0 ] && shift
 case "$sub" in
   add-host)    cmd_add_host "$@" ;;
@@ -661,5 +684,6 @@ case "$sub" in
   list)        cmd_list "$@" ;;
   preflight)   cmd_preflight "$@" ;;
   remove-host) cmd_remove_host "$@" ;;
+  recreate)    cmd_recreate "$@" ;;
   *)           usage ;;
 esac
