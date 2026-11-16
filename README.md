@@ -4,8 +4,8 @@ Claude Desktop の SSH 接続で、**接続名ごとに専用のコンテナ**�
 
 - 接続名は `ctr-<作業名>.<ホストID>`（例 `ctr-feature1.lab1`）。ドットの後ろでホストを選びます。
 - **GPU を使うコンテナ**は、接続名の先頭を `gpu-` にするだけです（例 `gpu-train.lab1`）。GPU が使えるホストかどうかは自動で判定します。
-- 同じ接続名なら、何度つないでも同じコンテナに戻ります。違う接続名なら、別のコンテナ・別の作業ディレクトリになります。
-- 各コンテナの作業ディレクトリは**空で始まります**。リポジトリの clone などは、コンテナ内の Claude Code（や利用者）が行います。
+- 同じ接続名なら、何度つないでも同じコンテナに戻ります。違う接続名なら、別のコンテナ・別のホームになります。
+- 各コンテナのホーム（接続名ごとのボリューム）は**空で始まります**。リポジトリの clone などは、コンテナ内の Claude Code（や利用者）がホームの下で行います。ホームはコンテナを作り直しても残ります。
 - 新しいコンテナがほしいときは、Desktop に新しい名前の SSH 接続を追加するだけです。
 - コンテナは各ホストの **rootless Podman** で動かします。
 - ホストへは **Cloudflare Tunnel**（`cloudflared access ssh`）経由で接続できます。
@@ -23,7 +23,7 @@ Claude Desktop ──SSH(ctr-feat.lab1)──▶ ~/.ssh/config の cubby ブロ�
    ProxyCommand: ssh lab1 .local/bin/ctr-connect ctr-feat.lab1
                   │  └ Host lab1 は ProxyCommand cloudflared access ssh（Cloudflare Tunnel）
                   ▼
-   lab1 上の ctr-connect: コンテナ・作業ディレクトリがなければ作る / 止まっていれば起動
+   lab1 上の ctr-connect: コンテナがなければ作る / 止まっていれば起動
                   ▼
    podman exec -i ctr-feat nc 127.0.0.1 22
                   ▼
@@ -37,7 +37,6 @@ Claude Desktop ──SSH(ctr-feat.lab1)──▶ ~/.ssh/config の cubby ブロ�
 | コンテナ | `ctr-<作業名>` / `gpu-<作業名>`（ラベル `ctr.managed=true`）。ポートは公開しない |
 | ユーザー | コンテナ用のユーザーは作らない。**ホストのログインユーザーそのもの**（同じ名前・UID・GID・ホームのパス）でコンテナに入る |
 | ホーム | ボリューム `<名前>-home` → コンテナの、ホストと同じホームのパス（例 `/home/alice`）。Claude Code のセッション・設定・認証情報 |
-| 作業ディレクトリ | `~/cubby/work/<名前>`（`--work-root` で変更可）。コンテナにも同じパスでマウント |
 | 設定 | `~/.config/cubby/config.env`、追加マウントは `~/.config/cubby/mounts` |
 | ホスト鍵 | `~/.config/cubby/hostkeys/`（ホストごとに 1 つ。そのホストの全コンテナで共有） |
 | 公開鍵 | `~/.config/cubby/authorized_keys/<ユーザー名>` |
@@ -52,7 +51,7 @@ client/cubby.ps1        Windows の PowerShell から cubby を実行するラ�
 client/cubby.cmd        Windows の cmd.exe から cubby を実行するラッパー
 client/ssh_config.snippet  cubby が書く ssh_config の例（macOS・Windows）
 bin/ctr-connect         ProxyCommand から呼ばれる本体（ホスト側）
-bin/ctr-list            コンテナ・ボリューム・作業ディレクトリの一覧（ホスト側）
+bin/ctr-list            コンテナ・ボリュームの一覧（ホスト側）
 bin/ctr-remove          片付け（ホスト側）
 bin/ctr-recreate        コンテナだけを作り直す（マウントの設定の反映。ホスト側）
 bin/ctr-sync            自動更新の本体（リポジトリの最新を取得して反映する。ホスト側）
@@ -75,7 +74,6 @@ tests/smoke.sh          CLI で確かめられる受け入れテスト（手元�
 | ホストへのログイン用の公開鍵 | 鍵認証で入れなければ、ログインのパスワードを 1 回だけ尋ねて手元の公開鍵をホストの `~/.ssh/authorized_keys` に追記する（`ssh-copy-id` と同じ。既存の行は消さない） |
 | パッケージ | podman, git, flock, ssh-keygen, tar, newuidmap/newgidmap ほか（apt / dnf / yum / zypper / pacman / apk に対応） |
 | rootless の設定 | `/etc/subuid`・`/etc/subgid` の範囲、newuidmap/newgidmap の権限、linger |
-| 作業ディレクトリの置き場 | 既定の `~/cubby/work` は sudo なしで作る。ログインユーザーが作れない場所（`/srv/...` など）を指定したときだけ、ログインユーザー所有で作る |
 | GPU（NVIDIA） | ドライバが動いていれば、NVIDIA Container Toolkit と CDI の定義（「GPU を使う」を参照） |
 | cubby 本体 | 設定、コンテナ用のホスト鍵、公開鍵の登録、スクリプト、コンテナイメージ |
 
@@ -119,10 +117,10 @@ sh client/cubby add-host lab1 --hostname lab1.example.com --user alice --cloudfl
 
 ProxyCommand には `ssh` と `cloudflared` の**絶対パス**を書きます。GUI から起動した Claude Desktop（特に macOS）は PATH が最小限で、Homebrew などで入れたコマンドが見つからないためです。cloudflared を後から入れた・移した場合は `add-host` を再実行してください。
 
-既に `~/.ssh/config` にホストの設定があるなら、`--hostname` などの代わりに `--ssh-host <その名前>` を指定します。作業ディレクトリの置き場を変えるなら `--work-root` を指定します（初回のみ有効。既存の設定は変えません）。
+既に `~/.ssh/config` にホストの設定があるなら、`--hostname` などの代わりに `--ssh-host <その名前>` を指定します。
 
 ```sh
-sh client/cubby add-host lab2 --ssh-host lab2 --work-root /data/cubby-work
+sh client/cubby add-host lab2 --ssh-host lab2
 ```
 
 **手元の鍵について**: 既定の名前（`~/.ssh/id_ed25519` など）の鍵も ssh-agent の鍵もなければ、`add-host` が `~/.ssh/id_ed25519` をパスフレーズなしで作ります（Desktop は接続の途中でパスフレーズを入力できないため）。別の名前の鍵を使うなら `--identity` で指定します。パスフレーズなしの鍵は ssh-agent への登録は不要です。
@@ -141,7 +139,7 @@ ssh ctr-test.lab1 hostname   # → ctr-test と返れば完了（Windows は Pow
 
 ## 日常の使い方
 
-- **新しい作業を始める**: Claude Desktop の Code タブで「+ Add SSH connection」→ SSH Host に `ctr-<作業名>.<ホストID>`（例 `ctr-feature1.lab1`）を指定します。初回接続時に、空の作業ディレクトリとコンテナが作られます。
+- **新しい作業を始める**: Claude Desktop の Code タブで「+ Add SSH connection」→ SSH Host に `ctr-<作業名>.<ホストID>`（例 `ctr-feature1.lab1`）を指定します。初回接続時に、空のホームとコンテナが作られます。
   - 作業名は `ctr-`（GPU なし）または `gpu-`（GPU あり）で始まる英小文字・数字・ハイフン、44 文字以内
   - 同じ作業名でもホストが違えば別のコンテナです（`ctr-feature1.lab1` と `ctr-feature1.lab2`）
 - **続きから作業する**: 同じ接続を選びます。Desktop を再起動しても同じコンテナに戻ります。
@@ -150,15 +148,15 @@ ssh ctr-test.lab1 hostname   # → ctr-test と返れば完了（Windows は Pow
 
 Desktop には登録した SSH 接続を編集・削除する画面がない時期がありました。接続名は作業単位で使い回す運用をおすすめします。
 
-## 作業ディレクトリとリポジトリ
+## ホームとリポジトリ
 
-cubby はリポジトリを管理しません。各コンテナには空の作業ディレクトリ（ホストの `~/cubby/work/<名前>`、コンテナ内も同じパス）が用意されるだけです。必要なリポジトリは、コンテナ内で Claude Code に clone させてください（例「`git@github.com:example/web.git` を clone して…」）。1 つのコンテナで複数のリポジトリを扱っても、リポジトリを使わない作業でもかまいません。
+cubby はリポジトリを管理しません。各コンテナには空のホーム（接続名ごとのボリューム `<名前>-home`）が用意されるだけです。必要なリポジトリは、コンテナ内で Claude Code に clone させてください（例「`git@github.com:example/web.git` を clone して…」）。1 つのコンテナで複数のリポジトリを扱っても、リポジトリを使わない作業でもかまいません。
 
-- **ユーザー**: コンテナ用のユーザーは作りません。ホストのログインユーザー（例 alice、UID 1000）そのものとしてコンテナに入ります。作業ディレクトリや追加マウントのファイルは、ホストとコンテナで所有者が一致します。
-- **ホームは同じパスでも中身は別**です。コンテナのホーム（例 `/home/alice`）はコンテナごとのボリュームで、ホストの `/home/alice` の中身は見えません（作業ディレクトリと、`--mount` で指定したものだけが見えます）。
-- SSH でログインした直後の場所はホーム（ホストと同じパス。例 `/home/alice`）です。作業ディレクトリは `~/cubby/work/<名前>`（例 `/home/alice/cubby/work/ctr-feature1`）で、ホストとコンテナで同じパスです（Claude Code のセッションを始めるディレクトリとして指定します）。
-- 作業ディレクトリはホストからも同じパスで見えます。コンテナで作ったファイルは、ホストではログインユーザーの所有になります。
-- コンテナを作り直しても（`ctr-recreate`、`podman rm`）、作業ディレクトリとホームは残ります。
+- **ユーザー**: コンテナ用のユーザーは作りません。ホストのログインユーザー（例 alice、UID 1000）そのものとしてコンテナに入ります。追加マウントのファイルは、ホストとコンテナで所有者が一致します。
+- **ホームは同じパスでも中身は別**です。コンテナのホーム（例 `/home/alice`）はコンテナごとのボリュームで、ホストの `/home/alice` の中身は見えません（`--mount` で指定したものだけが見えます）。
+- SSH でログインした直後の場所はホーム（例 `/home/alice`）です。Claude Code のセッションもホームの下で始めます。
+- ホームのファイルはホストからは直接見えません（Podman のボリュームの中にあります）。ホストと共有したいファイルは、`--mount` で指定したディレクトリ（例 `/mnt/pool`）に置いてください。
+- コンテナを作り直しても（`ctr-recreate`、`podman rm`）、ホームは残ります。
 - **GitHub などの認証はコンテナ内で用意してください**。ホーム（ボリューム）に置いたものはコンテナを作り直しても残るので、一度設定すればそのコンテナでは使い続けられます（例: コンテナ内で `gh auth login`（gh は別途インストール）、デプロイキーや個人用の鍵を `~/.ssh` に置く、`git config --global user.name/user.email`）。
 - 手元の ssh-agent はコンテナに転送しません（Desktop がエージェント転送を使うかは未確認のため）。
 
@@ -189,7 +187,7 @@ cubby はリポジトリを管理しません。各コンテナには空の作�
 コンテナは **接続名ごと** に 1 つです。Claude Desktop は接続を 1 本張ったまま、その上でセッションを増やします（セッションごとに、コンテナの中で Claude Code がもう 1 つ起動します）。そのため、同じ接続名のセッションはすべて同じコンテナに入ります。
 
 - 会話（Claude Code のプロセス）はセッションごとに分かれますが、ファイル・入れたパッケージ・起動したプログラムは共通です。
-- 環境を分けたい作業は、Desktop で別の接続名（例 `ctr-shomu-a.lab1`、`ctr-shomu-b.lab1`）を使ってください。接続名ごとに別のコンテナ・ホーム・作業ディレクトリになります。
+- 環境を分けたい作業は、Desktop で別の接続名（例 `ctr-shomu-a.lab1`、`ctr-shomu-b.lab1`）を使ってください。接続名ごとに別のコンテナ・ホームになります。
 
 ## コンテナの中から別のコンテナを起動する
 
@@ -202,7 +200,7 @@ docker compose up -d
 ```
 
 - 起動したコンテナは、**ホスト上の兄弟のコンテナ**になります（入れ子ではありません）。イメージのキャッシュはホストと共有し、cubby のコンテナを作り直しても消えません。不要になったら `docker rm` / `docker compose down` で消してください（`ctr-remove` は消しません）。
-- 作業ディレクトリはホストと同じパスなので、`docker run -v "$PWD:/src" ...` のようなマウントはそのまま使えます。**ホーム（`~`）の下のファイルは、作業ディレクトリと `--mount` のもの以外はホストにないので、マウントしても空に見えます**。
+- **ホーム（`~`）のファイルはホストにないので、`docker run -v ~/...:...` でマウントしても空に見えます**。ホームのファイルを渡すなら `--volumes-from $(hostname)`（cubby のコンテナと同じホーム・マウントになる）を使います（例 `docker run --rm --volumes-from $(hostname) -w "$PWD" node:22 npm test`）。`--mount` で指定したディレクトリ（例 `/mnt/pool`）は `-v` でそのまま渡せます。
 - 起動したコンテナのポートに `localhost` でつなぎたいときは、`--network container:$(hostname)` を付けて、cubby のコンテナと同じネットワークで動かします（例 `docker run -d --network container:$(hostname) postgres` → `localhost:5432`）。
 - `docker build`・`docker compose build` は、Podman が実装している従来のビルド（`DOCKER_BUILDKIT=0`）を使うよう設定しています。
 - ホストで `podman.socket`（systemd のユーザーサービス）を `add-host` / `update` が有効にします。systemd のないホストでは使えません（ホストで `podman system service --time=0 &` を動かしておけば使えます）。使えるかどうかは `ctr-list` の `docker in containers:` に出ます。
@@ -218,7 +216,7 @@ sudo apt-get update && sudo apt-get install -y jq
 
 - コンテナ内の root は rootless Podman のユーザー名前空間の中の root で、**ホストの root ではありません**。ホストに対しては、ログインユーザーができること以上はできません。
 - `apt` などで入れたものはコンテナに残りますが、**コンテナを作り直すと消えます**（`ctr-recreate`、`podman rm`）。常に必要なものは `image/Dockerfile` に追記して `cubby update` を実行してください（イメージが自動で作り直されます。「コンテナイメージのカスタマイズ」を参照）。
-- sudo（root）で作業ディレクトリに作ったファイルは、ホストではログインユーザーではなく別の UID（例 100000）の所有に見え、ホストのログインユーザーからは直接変更できません。作業ディレクトリでは sudo を使わずに作業するのが無難です（`ctr-remove --force` は `podman unshare` で消すので、片付けはできます）。
+- sudo（root）で追加マウントのディレクトリに作ったファイルは、ホストではログインユーザーではなく別の UID（例 100000）の所有に見え、ホストのログインユーザーからは直接変更できません。追加マウントの中では sudo を使わずに作業するのが無難です。
 - 不要なホストでは、ホストの `~/.config/cubby/config.env` に `CTR_SUDO=no` と書き、既存のコンテナを `ctr-recreate` で作り直すと無効になります。
 
 ## GPU を使う
@@ -237,7 +235,7 @@ sh client/cubby hosts
 # lab2   ssh-host=lab2   gpu=no    connect as ctr-<name>.lab2
 ```
 
-- `ctr-x` と `gpu-x` は別のコンテナ・別の作業ディレクトリです（GPU の有無はコンテナを作るときに決まるため）。
+- `ctr-x` と `gpu-x` は別のコンテナ・別のホームです（GPU の有無はコンテナを作るときに決まるため）。
 - GPU が使えないホストに `gpu-` でつなぐと、何も作らずに接続を断ります（`ctr-` でつなぐよう案内します）。
 
 **ホストの準備（自動）**: `cubby add-host` は、ホストで **NVIDIA のドライバが動いていれば**（`nvidia-smi` が通れば）、次を自動で行います。
@@ -277,7 +275,7 @@ ctr-recreate ctr-feature1
 ```
 
 - 自動更新と `cubby update` は `image/` の中身（Dockerfile など）のハッシュをイメージのラベル（`cubby.image-hash`）と比べ、**変わっていれば自動で作り直します**。変わっていなければ作り直しません（`--rebuild` で強制できます）。
-- **古いイメージのコンテナは、次に接続したとき、誰もそのコンテナにつないでいなければ自動で作り直されます**（ホームと作業ディレクトリは残ります。中で続いていた Claude Code の処理は終わります）。誰かがつないでいる間は作り直さず、後の接続のときに作り直します。**Claude Desktop は SSH の接続を張ったまま使い続けます**（新しいセッションも同じ接続の上で動きます）。そのため Desktop を開いている間は自動の作り直しが起きず、Desktop を終了して開き直したときに作り直されます。待たずに作り直すなら、手元で `cubby recreate ctr-<名前>.<id>`（つないでいる Desktop のセッションは切れ、つなぎ直すと新しいコンテナになります）か、ホストで `ctr-recreate <名前>`。自動で作り直したくなければ `config.env` に `CTR_AUTO_RECREATE=no`。マウントの設定の変更・docker 用ソケットの有無の変化も同じ扱いです。
+- **古いイメージのコンテナは、次に接続したとき、誰もそのコンテナにつないでいなければ自動で作り直されます**（ホームは残ります。中で続いていた Claude Code の処理は終わります）。誰かがつないでいる間は作り直さず、後の接続のときに作り直します。**Claude Desktop は SSH の接続を張ったまま使い続けます**（新しいセッションも同じ接続の上で動きます）。そのため Desktop を開いている間は自動の作り直しが起きず、Desktop を終了して開き直したときに作り直されます。待たずに作り直すなら、手元で `cubby recreate ctr-<名前>.<id>`（つないでいる Desktop のセッションは切れ、つなぎ直すと新しいコンテナになります）か、ホストで `ctr-recreate <名前>`。自動で作り直したくなければ `config.env` に `CTR_AUTO_RECREATE=no`。マウントの設定の変更・docker 用ソケットの有無の変化も同じ扱いです。
 - Dockerfile に `USER` 行やユーザーの作成は書かないでください（起動時にホストのユーザーを登録する `ctr-entrypoint` と食い違います）。
 - ベースイメージ（ホストの OS に合わせたもの。`ctr-list` の `container OS`）は、ホストにキャッシュされたものを使います。OS の更新を取り込みたいときは、ホストでそのイメージを `podman pull` してから `cubby update <id> --rebuild` を実行します。
 - 作り直すと古いイメージは名前のない状態（`<none>`）でホストに残ります。古いイメージのコンテナを作り直した後なら、ホストで `podman image prune` で消せます（cubby は自動では消しません）。
@@ -303,7 +301,7 @@ sh client/cubby update lab1 --unmount /scratch
 /home/alice/.cache/huggingface:ro
 ```
 
-- **既存のコンテナへの反映**: マウントはコンテナを作るときに決まります。設定を変えたら、ホストで `ctr-recreate <名前>` を実行してください。コンテナだけを作り直し、ホームと作業ディレクトリは残ります（動いている Claude Code のセッションは止まりますが、記録はホームに残ります）。次の接続で新しい設定のコンテナが作られます。
+- **既存のコンテナへの反映**: マウントはコンテナを作るときに決まります。設定を変えたら、ホストで `ctr-recreate <名前>` を実行してください。コンテナだけを作り直し、ホームは残ります（動いている Claude Code のセッションは止まりますが、記録はホームに残ります）。次の接続で新しい設定のコンテナが作られます。
 - 反映していないコンテナは、`add-host` / `update` の出力・`ctr-list`（`cubby list`）・接続時のメッセージで知らせます。接続時に自動で作り直すことはしません（セッションが切れるため）。
 - ホストにないディレクトリは、警告を出して飛ばします（接続は失敗させません）。後から作られたら、`ctr-recreate` で反映できます。
 - rootless なので、コンテナから書けるのはホストのログインユーザーが書けるファイルだけです。
@@ -316,12 +314,11 @@ sh client/cubby update lab1 --unmount /scratch
 ```sh
 ctr-remove ctr-feature1          # 対象を表示して確認を求める
 ctr-remove -y ctr-feature1       # 確認を省略
-ctr-remove --force ctr-feature1  # 作業ディレクトリに中身があっても消す
+ctr-remove --force ctr-feature1  # ホームに未 push の作業があっても消す
 ```
 
-コンテナ → 作業ディレクトリ → ホームのボリュームの順で消します。**作業ディレクトリが空でないと、何も消さずに止まり**、中身を表示します。中に git のリポジトリ（コンテナ内で clone したもの）があれば、**未コミットの変更と push していないコミットの数**も表示します。必要なものを push・移動してから再実行するか、`--force` で中身ごと消してください。
+コンテナ → ホームのボリュームの順で消します。ホームに、**未コミットの変更か push していないコミットのある git のリポジトリ**（コンテナ内で clone したもの）があれば、**何も消さずに止まり**、そのリポジトリを表示します。push してから再実行するか、`--force` で消してください。ホームを残したままコンテナだけを作り直すなら `ctr-recreate` です。
 
-`ctr-list`（手元からは `cubby list`）でも、各作業ディレクトリの中のリポジトリのブランチと未コミットの変更の数が見られます。
 
 手元の登録だけを消すには `sh client/cubby remove-host lab1`（`~/.ssh/config` の cubby ブロックと known_hosts の `cubby-lab1` を消します。ホスト上のものは残ります）。
 
@@ -329,7 +326,7 @@ ctr-remove --force ctr-feature1  # 作業ディレクトリに中身があって
 
 自宅と会社など、複数の PC から同じホストを使えます。それぞれの PC で、**同じホスト ID** を指定して `cubby add-host` を実行してください。2 台目の公開鍵が追記され、ホストの設定やイメージはそのまま使われます。
 
-- 同じ接続名でつなぐと同じコンテナ・同じ作業ディレクトリになります。ただし、一方の PC の Desktop で始めたセッションをもう一方で再開できるか、2 台から同時につないで問題ないかは未検証です。同時に作業するなら、PC ごとに接続名を分けるのが確実です。
+- 同じ接続名でつなぐと同じコンテナ・同じホームになります。ただし、一方の PC の Desktop で始めたセッションをもう一方で再開できるか、2 台から同時につないで問題ないかは未検証です。同時に作業するなら、PC ごとに接続名を分けるのが確実です。
 - 自宅と会社で別の Anthropic アカウントを使う場合は、コンテナ内の認証情報が上書きされないよう、接続名を PC ごとに分けてください。
 
 ## テスト
@@ -353,9 +350,9 @@ macOS・Linux・Git Bash は `sh client/cubby ...`、Windows の PowerShell は 
 | `cubby add-host <id> [オプション]` | リモートホストを登録し、ホストの環境を整える（初回）。登録の設定（接続先・ユーザー・鍵など）を変えるときも、これを実行し直す |
 | `cubby update [id...] [オプション]` | 登録済みのホストを、登録時の設定のまま更新する（省略時は全ホスト）。最新のスクリプトを転送し、`image/`（Dockerfile など）が変わっていればイメージを自動で作り直す。マウントの追加・削除もこれで行う |
 | `cubby hosts` | 登録済みのホストを一覧する（SSH 名・GPU の有無・接続名の形） |
-| `cubby list [id...]` | 各ホストのコンテナ・ボリューム・追加マウント・作業ディレクトリ（中のリポジトリの状態）を一覧する。省略時は全ホスト |
+| `cubby list [id...]` | 各ホストのコンテナ・ボリューム・追加マウント（設定が古いコンテナ）を一覧する。省略時は全ホスト |
 | `cubby preflight <id>` | ホストの事前確認（何も変更しない） |
-| `cubby recreate [-y] <接続名>` | コンテナを今すぐ作り直す（例 `cubby recreate ctr-office.lab1`）。ホームと作業ディレクトリは残り、つないでいる Desktop のセッションは切れる。イメージの更新後、Desktop を開いたままで自動の作り直しが待たされるときに使う。`-y` で確認を省略 |
+| `cubby recreate [-y] <接続名>` | コンテナを今すぐ作り直す（例 `cubby recreate ctr-office.lab1`）。ホームは残り、つないでいる Desktop のセッションは切れる。イメージの更新後、Desktop を開いたままで自動の作り直しが待たされるときに使う。`-y` で確認を省略 |
 | `cubby remove-host [-y] <id>` | 手元の登録（`~/.ssh/config` の cubby ブロックと known_hosts の `cubby-<id>`）だけを消す。ホスト上のものは消さない。`-y` で確認を省略 |
 
 `<id>` はホスト ID（英小文字・数字・ハイフン、32 文字以内）。接続名の末尾や ssh_config の名前に使います。
@@ -371,7 +368,6 @@ macOS・Linux・Git Bash は `sh client/cubby ...`、Windows の PowerShell は 
 | `--identity FILE` | ssh の既定 | ホストとコンテナへのログインに使う秘密鍵。公開鍵の登録には `FILE.pub` を使う（`--key` を省略したらコンテナにもこれを登録する）。鍵の名前が `id_ed25519` などの既定と違うときに指定する。`~/.ssh/...`・`C:\Users\...` どちらの書き方でもよい |
 | `--ssh-host ALIAS` | `<id>` | ホストの SSH 名。`--hostname` を使わず、`~/.ssh/config` に自分で書いた既存の設定を使うときに指定する |
 | `--key FILE` | `~/.ssh/id_ed25519.pub` → `id_ecdsa.pub` → `id_rsa.pub` → ssh-agent の鍵 → どれもなければ `~/.ssh/id_ed25519` を作る | コンテナ（とホスト）に登録する公開鍵 |
-| `--work-root PATH` | `~/cubby/work` | ホスト上の作業ディレクトリの置き場。各コンテナの作業ディレクトリは `<置き場>/<名前>`。初回のみ有効（既存の設定は変えない） |
 | `--mount SPEC` | なし | そのホストの全コンテナに毎回マウントするディレクトリを足す。複数指定可。`SPEC` は `ホストのパス[:コンテナ内のパス][:ro\|rw]`（省略時は同じパス・`rw`） |
 | `--unmount PATH` | なし | そのホストのパスのマウントをやめる。複数指定可 |
 | `--no-gpu` | GPU を自動判定 | GPU の準備（NVIDIA Container Toolkit の導入・CDI の定義の作成）をしない |
@@ -383,7 +379,7 @@ macOS・Linux・Git Bash は `sh client/cubby ...`、Windows の PowerShell は 
 | `--auto-update-interval TIME` | `15min` | 自動更新の間隔（systemd の書式。例 `5min`、`1h`） |
 
 - 登録の設定は `~/.ssh/config` の cubby ブロックの `# cubby-args:` の行に記録され、`cubby update` はそれを使って実行し直します。
-- `--mount` / `--unmount` / `--work-root` などで変えた設定を既存のコンテナに反映するには、ホストで `ctr-recreate <名前>` を実行します。
+- `--mount` / `--unmount` などで変えた設定を既存のコンテナに反映するには、ホストで `ctr-recreate <名前>` を実行します。
 
 #### `cubby update` のオプション
 
@@ -403,9 +399,9 @@ macOS・Linux・Git Bash は `sh client/cubby ...`、Windows の PowerShell は 
 
 | コマンド | 内容 |
 |---|---|
-| `ctr-list` | このホストのコンテナ・ボリューム・追加マウント（設定が古いコンテナ）・作業ディレクトリ（中のリポジトリのブランチと未コミットの変更の数）を一覧する |
-| `ctr-remove [-y] [--force] <名前>` | コンテナ・作業ディレクトリ・ホームのボリュームを消す。作業ディレクトリが空でなければ、何も消さずに止まる（中のリポジトリの未コミット・未 push も表示）。`-y` で確認を省略、`--force` で中身があっても消す |
-| `ctr-recreate [-y] <名前>` | コンテナだけを作り直す（ホームと作業ディレクトリは残る）。次の接続で今の設定（追加マウント・sudo など）のコンテナが作られる。`-y` で確認を省略 |
+| `ctr-list` | このホストのコンテナ・ボリューム・追加マウント（設定が古いコンテナ）・古いイメージのコンテナを一覧する |
+| `ctr-remove [-y] [--force] <名前>` | コンテナとホームのボリュームを消す。ホームに未コミット・未 push の git のリポジトリがあれば、何も消さずに止まる。`-y` で確認を省略、`--force` でそれでも消す |
+| `ctr-recreate [-y] <名前>` | コンテナだけを作り直す（ホームは残る）。次の接続で今の設定（追加マウント・sudo など）のコンテナが作られる。`-y` で確認を省略 |
 | `ctr-sync [--force]` | 自動更新の本体。cubby のリポジトリを取得し、新しいコミットがあれば反映する（タイマーから定期的に実行される。手で実行すればすぐ反映）。`--force` でコミットが同じでも反映し直す |
 | `ctr-connect <接続名>` | ssh_config の ProxyCommand から呼ばれる本体。手で実行するのは調査のときだけ（例 `ctr-connect ctr-x.lab1 </dev/null \| head -c 8` が `SSH-2.0-` を返すか） |
 
@@ -420,7 +416,7 @@ macOS・Linux・Git Bash は `sh client/cubby ...`、Windows の PowerShell は 
 | 部分 | 内容 |
 |---|---|
 | `ctr-` / `gpu-` | `ctr-` は GPU なし、`gpu-` は GPU あり（GPU が使えるホストのみ） |
-| `<作業名>` | 英小文字・数字・ハイフン。`ctr-` / `gpu-` を含めて 44 文字以内。コンテナ名・作業ディレクトリ名になる |
+| `<作業名>` | 英小文字・数字・ハイフン。`ctr-` / `gpu-` を含めて 44 文字以内。コンテナ名・ホームのボリューム名（`<名前>-home`）になる |
 | `<ホストID>` | `cubby add-host` で決めた ID |
 
 ### テスト: `tests/smoke.sh`
@@ -431,9 +427,8 @@ sh tests/smoke.sh <id> [--cleanup]
 
 | 引数・環境変数 | 内容 |
 |---|---|
-| `--cleanup` | 最後にテスト用のコンテナ・作業ディレクトリ・ボリュームを `ctr-remove --force` で消す |
+| `--cleanup` | 最後にテスト用のコンテナ・ボリュームを `ctr-remove --force` で消す |
 | `CTR_SMOKE_NAME` | テスト用の名前（既定 `ctr-smoke`。GPU のテストは `gpu-smoke`） |
-| `CTR_WORK_ROOT` | ホストの作業ディレクトリの置き場（既定: ホストの設定の値） |
 
 ### ホストの設定: `~/.config/cubby/config.env`
 
@@ -442,7 +437,6 @@ sh tests/smoke.sh <id> [--cleanup]
 | 変数 | 既定 | 内容 |
 |---|---|---|
 | `CTR_HOST_ID` | `add-host` の ID | このホストの ID。接続名のホスト ID と一致しない接続は断る |
-| `CTR_WORK_ROOT` | `~/cubby/work` | 作業ディレクトリの置き場 |
 | `CTR_IMAGE` | `localhost/ctr-dev:latest` | コンテナイメージ |
 | `CTR_GPU_ARGS` | `--device nvidia.com/gpu=all` | `gpu-` のコンテナに付ける podman の引数（例 AMD は `--device /dev/kfd --device /dev/dri --group-add keep-groups`） |
 | `CTR_SUDO` | `yes` | `no` にするとコンテナ内の sudo を許可しない |
@@ -484,7 +478,7 @@ sh tests/smoke.sh <id> [--cleanup]
 | `could not log in ... with the password` | ログインのパスワード。ホストの sshd がパスワード認証を許可しているか |
 | `key authentication still fails` | ホストの `~`・`~/.ssh` の権限（グループや他人が書けると sshd が鍵を無視する）。鍵にパスフレーズがあるなら ssh-agent に登録されているか |
 | `accepts only public keys` | ホストがパスワード認証を許可していない。最初の鍵の登録だけ別の手段で行う |
-| `--repo ... was removed` | リポジトリの管理はなくなった。コンテナ内で clone する。作業ディレクトリの置き場は `--work-root` |
+| `--repo ... was removed` | リポジトリの管理はなくなった。コンテナ内で clone する |
 | `this host has no usable GPU` | `cubby hosts` の `gpu=`。ホストで `nvidia-smi` が通るか（ドライバ）。通るなら `cubby update <id>` |
 | `gpu=no` なのに GPU がある | ドライバの更新後なら `cubby update <id>` で CDI の定義を作り直す。`update` の出力の `WARNING`（toolkit の導入や `nvidia-ctk cdi generate` の失敗） |
 | コンテナにマウントが見えない | `ctr-list` の extra mounts（ホストにないパスは飛ばされる）。設定を変えた後なら `ctr-recreate <名前>` |
@@ -492,13 +486,13 @@ sh tests/smoke.sh <id> [--cleanup]
 | `auto-update: ... -> setup-failed` | 反映（イメージのビルドなど）に失敗した。ホストの `~/.local/state/cubby/sync.log`。次の間隔で再試行する |
 | push したのに反映されない | 間隔（既定 15 分）を待つか、ホストで `ctr-sync`。`ctr-list` の `auto-update:` の行のブランチが push したブランチか |
 | コンテナ内で `docker` が `Cannot connect to the Docker daemon` | `ctr-list` の `docker in containers:`。no ならホストの systemd のユーザーセッション（`systemctl --user status podman.socket`）。yes なのに使えないなら、そのコンテナが古い（`... created without the host podman socket` と出る）ので `ctr-recreate <名前>` |
-| `docker run -v ~/...` で中身が空 | ホームの下は作業ディレクトリと `--mount` のもの以外ホストにない。作業ディレクトリの中に置く |
+| `docker run -v ~/...` で中身が空 | ホームはホストにない。`--volumes-from $(hostname)` を使うか、`--mount` のディレクトリに置く |
 | `containers still using an older image` / `the image was rebuilt since ...` | イメージを作り直した後、古いイメージのままのコンテナがある。次の接続のとき（誰もつないでいなければ）自動で作り直される。Desktop は接続を張ったままなので、開いている間は作り直されない。すぐなら手元で `cubby recreate ctr-<名前>.<id>` |
 | Claude が「Python がない」「dnf がない」など、入っているはずのものがないと言う | そのコンテナが古いイメージのまま（`cubby list` の `containers still using an older image`）。`cubby recreate ctr-<名前>.<id>` してつなぎ直す |
 | `mount settings changed since ...` | マウントの設定が変わった。反映するならホストで `ctr-recreate <名前>` |
 | `sudo: a password is required` | ホストの `config.env` が `CTR_SUDO=no` になっていないか。旧版のイメージで作ったコンテナなら `cubby update <id>` の後に `ctr-recreate <名前>` |
-| `work directory ... is not empty` | `ctr-remove` の安全装置。中身（とリポジトリの未コミット・未 push）を確かめてから、移すか `--force` |
-| コンテナ内の git で認証エラー | コンテナ内で GitHub などの認証を用意する（「作業ディレクトリとリポジトリ」を参照） |
+| `the home has git repositories with uncommitted or unpushed work` | `ctr-remove` の安全装置。表示されたリポジトリを push してから再実行するか `--force` |
+| コンテナ内の git で認証エラー | コンテナ内で GitHub などの認証を用意する（「ホームとリポジトリ」を参照） |
 | `ssh ctr-x.<id>` が `kex_exchange_identification` などで即切れる | `ssh <host> '.local/bin/ctr-connect ctr-x.<id> </dev/null \| head -c 8'` が `SSH-2.0-` を返すか。標準エラー出力の `ctr-connect:` のメッセージ |
 | `invalid name` / `host id mismatch` | 接続名が `ctr-<作業名>.<ホストID>` の形か。ホスト ID はホストの `~/.config/cubby/config.env` の `CTR_HOST_ID` |
 | `lock timeout` | 同名の ctr-connect が準備中のまま残っていないか（`$XDG_RUNTIME_DIR/cubby-locks`） |
@@ -507,7 +501,6 @@ sh tests/smoke.sh <id> [--cleanup]
 | `container host key ... changed` | ホスト側でホスト鍵を作り直した場合。意図したものなら `--replace-hostkey` を付けて再実行 |
 | Desktop を閉じるとセッションが消える | ホストの linger（`loginctl show-user <ユーザー> -p Linger`） |
 | コンテナ作成時に `keep-id` や `newuidmap` のエラー | `/etc/subuid`・`/etc/subgid` にログインユーザーの行があるか |
-| 作業ディレクトリで書き込みエラー | 置き場がログインユーザーの書ける場所か。イメージをビルドし直す（`cubby update <id> --rebuild`） |
 | Desktop で本体の配置に失敗する | Desktop のログ、コンテナ内の `~/.claude/remote/`。イメージに足りないコマンドやライブラリがないか |
 
 ## 注意
@@ -523,8 +516,9 @@ sh tests/smoke.sh <id> [--cleanup]
 |---|---|---|
 | Docker | rootless Podman（`--userns=keep-id --user root`、`--security-opt label=disable`、`--uts/--network private`） | 利用者の環境に合わせた |
 | 単一ホスト、接続名 `ctr-<作業名>` | 複数ホスト、接続名 `ctr-<作業名>.<ホストID>`、`Host ctr-*.<id>` をホストごとに生成 | 複数のリモートホストを使い分けるため |
-| 元リポジトリ（`/srv/project`）から接続名ごとに git worktree とブランチを作り、`.git` だけをマウント | リポジトリは管理しない。各コンテナに空の作業ディレクトリ（`~/cubby/work/<名前>`）を用意し、clone はコンテナ内の Claude Code が行う | 1 ホスト 1 リポジトリの前提が実際の運用（コンテナごとに必要なリポジトリを AI が clone する）と合わないため |
-| `ctr-remove` は未コミットの変更があれば止まる | 作業ディレクトリが空でなければ止まり、中のリポジトリの未コミット・未 push を表示する | 上の変更に合わせた |
+| 元リポジトリ（`/srv/project`）から接続名ごとに git worktree とブランチを作り、`.git` だけをマウント | リポジトリは管理しない。clone はコンテナ内の Claude Code がホームの下で行う | 1 ホスト 1 リポジトリの前提が実際の運用（コンテナごとに必要なリポジトリを AI が clone する）と合わないため |
+| `ctr-remove` は未コミットの変更があれば止まる | ホームの git のリポジトリに未コミット・未 push があれば止まる | 上の変更に合わせた |
+| 各コンテナに作業ディレクトリ（ホストの `~/cubby/work/<名前>`）をマウント | 作業ディレクトリはなくし、ファイルはコンテナのホーム（ボリューム）に置く。ホストと共有するものは `--mount` のディレクトリへ | 利用者の要望。ホームも作り直しで残り、ホストとの共有は追加マウントで足りるため |
 | 設定・鍵は `/etc/ctr`（root 所有）、スクリプトは `/usr/local/bin` | `~/.config/cubby`、`~/.local/bin`（ログインユーザー所有） | rootless なので sudo を不要にした。rootless ではホストの root 所有のファイルをコンテナから読めない |
 | 公開鍵の登録・known_hosts の受け入れは手作業 | `cubby add-host` が自動で行う | 利用者の要望 |
 | ホストへは直接 SSH | Cloudflare Tunnel（`cloudflared access ssh`）を ProxyCommand に設定できる | 利用者の環境に合わせた |
@@ -539,7 +533,7 @@ sh tests/smoke.sh <id> [--cleanup]
 | ベースイメージは Debian 固定 | ホストの OS と同じディストリビューション・版をベースにする（Dockerfile は 1 つで apt / dnf を切り替える） | Claude がホストのカーネル名から OS を誤認するため（利用者の要望） |
 | 古いコンテナの作り直しは手作業（`ctr-recreate`） | 接続時に、誰もつないでいなければ自動で作り直す（認証済みの SSH セッションの有無で判断） | 利用者の要望 |
 | 開発ツールなし（sshd・git・curl のみ） | Go・Java 21・Node.js LTS・Python・jq・yq・kubectl・helm・AWS CLI を入れる | 利用者の要望 |
-| コンテナからコンテナは起動できない | ホストの Podman の API ソケットを `/var/run/docker.sock` に渡し、docker CLI で兄弟のコンテナを起動できる（入れ子ではない） | 利用者の要望。入れ子より速く、イメージのキャッシュを共有でき、作業ディレクトリのパスが一致するため |
+| コンテナからコンテナは起動できない | ホストの Podman の API ソケットを `/var/run/docker.sock` に渡し、docker CLI で兄弟のコンテナを起動できる（入れ子ではない） | 利用者の要望。入れ子より速く、イメージのキャッシュを共有できるため |
 | コンテナ内で sudo は使えない | ホストのユーザーにパスワードなしの sudo を許可（`CTR_SUDO=no` で無効） | 利用者の要望。コンテナ内の root はホストの root ではないため |
 | ホストの更新は手作業 | 各ホストが cubby のリポジトリを定期的に取得し、新しいコミットを自動で反映する（systemd のユーザータイマー・`ctr-sync`） | 利用者の要望（Dockerfile などの変更を自動で行き渡らせるため） |
 | イメージの作り直しは手作業（`docker build`） | `cubby update` が `image/` の中身のハッシュを比べ、変わっていれば自動で作り直す。古いイメージのコンテナを知らせる。登録後の更新は `add-host` ではなく `cubby update`（登録時の設定を記録して使う） | 利用者の要望 |

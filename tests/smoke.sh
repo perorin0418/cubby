@@ -6,11 +6,10 @@
 #
 # 前提: `client/cubby add-host <host-id> ...` を実行済み（ssh_config・鍵・イメージが揃っている）。
 #
-# テスト用の名前（既定 ctr-smoke）のコンテナ・作業ディレクトリ・ボリュームをホストに作る。
+# テスト用の名前（既定 ctr-smoke）のコンテナ・ホームのボリュームをホストに作る。
 # 片付け（テスト 12b など実際の削除）は --cleanup を付けたときだけ行う。
 #
 # 環境変数:
-#   CTR_WORK_ROOT    ホストの作業ディレクトリの置き場   （既定: ホストの config.env の値）
 #   CTR_SMOKE_NAME   テスト用の名前                     （既定 ctr-smoke）
 #   CUBBY_SSH_DIR    cubby と同じく ~/.ssh 以外を使うとき
 set -u
@@ -45,15 +44,11 @@ count_containers() {
   remote "podman ps -aq --filter label=ctr.name=$NAME | wc -l" | tr -d ' \r'
 }
 
-# 作業ディレクトリの置き場（ホストの設定。$HOME などはホスト側で展開する）
-WORK_ROOT=${CTR_WORK_ROOT:-$(remote '. "${XDG_CONFIG_HOME:-$HOME/.config}/cubby/config.env" 2>/dev/null; echo "${CTR_WORK_ROOT:-$HOME/cubby/work}"' | tr -d '\r')}
-WORK="$WORK_ROOT/$NAME"
-
-echo "== smoke test: $CONN via $REMOTE (work root $WORK_ROOT) =="
+echo "== smoke test: $CONN via $REMOTE =="
 
 # 前提: テスト用の名前がまだ使われていないこと（テスト 3 を新規作成で確かめるため）
 pre=$(count_containers)
-if [ "$pre" != 0 ] || remote "test -e '$WORK'"; then
+if [ "$pre" != 0 ] || remote "podman volume exists $NAME-home"; then
   echo "$NAME already exists on $REMOTE. Remove it first (ctr-remove $NAME) or set CTR_SMOKE_NAME." >&2
   exit 1
 fi
@@ -70,8 +65,8 @@ done
 # 3. 同名の同時接続でコンテナが 1 つ（新規作成の競合）
 remote "for i in 1 2; do (timeout 30 $RBIN/ctr-connect $NAME </dev/null 2>/dev/null | head -c 8 >/dev/null) & done; wait" >/dev/null 2>&1
 n=$(count_containers)
-if [ "$n" = 1 ] && remote "test -d '$WORK'"; then
-  ok "3 concurrent connects create exactly one container and its work directory"
+if [ "$n" = 1 ] && remote "podman volume exists $NAME-home"; then
+  ok "3 concurrent connects create exactly one container and its home volume"
 else
   ng "3 concurrent connects: containers=$n"
 fi
@@ -120,38 +115,35 @@ hsock=$(remote 'sed -n "s/^CTR_PODMAN_SOCKET=//p" "${XDG_CONFIG_HOME:-$HOME/.con
 if [ -z "$hsock" ]; then
   sk "D1 no podman API socket on $REMOTE (containers cannot start other containers)"
 else
-  # 兄弟のコンテナで作業ディレクトリを同じパスでマウントし、書いたものが見えるか（イメージはホストにあるものを使う）
-  out=$(cssh "cd '$WORK' && echo from-sibling-test > d1.txt && docker run --rm -v '$WORK:$WORK' localhost/ctr-dev:latest cat '$WORK/d1.txt'; rm -f '$WORK/d1.txt'" 2>&1 | tr -d '\r' | tail -n 1)
-  [ "$out" = from-sibling-test ] && ok "D1 docker run inside the container starts a sibling container (work dir shared at the same path)" \
+  # 兄弟のコンテナに --volumes-from でこのコンテナのホームを渡し、書いたものが見えるか（イメージはホストにあるものを使う）
+  out=$(cssh 'echo from-sibling-test > ~/d1.txt && docker run --rm --volumes-from "$(hostname)" localhost/ctr-dev:latest cat "$HOME/d1.txt"; rm -f ~/d1.txt' 2>&1 | tr -d '\r' | tail -n 1)
+  [ "$out" = from-sibling-test ] && ok "D1 docker run inside the container starts a sibling container (home shared with --volumes-from)" \
                                  || ng "D1 docker run inside the container: $out"
 fi
 
-# 5. 作業ディレクトリ: 空で始まり、ホストと同じパスで見え、書いたものがホストから見える
-if [ "$(cssh "ls -A '$WORK' | wc -l" 2>/dev/null | tr -d ' \r')" = 0 ] \
-   && cssh "echo hi > '$WORK/ctr-smoke-file'" >/dev/null 2>&1 \
-   && [ "$(remote "cat '$WORK/ctr-smoke-file'" | tr -d '\r')" = hi ] \
-   && [ "$(remote "stat -c %U '$WORK/ctr-smoke-file'" | tr -d '\r')" = "$(remote 'id -un' | tr -d '\r')" ]; then
-  ok "5 work directory starts empty at the same path; files written in the container appear on the host, owned by the login user"
+# 5. 作業ディレクトリは作らない（ログインするとホームにいる）
+cwd=$(cssh pwd 2>/dev/null | tr -d '\r')
+if [ "$cwd" = "${hid##* }" ] && ! remote "test -e \"\$HOME/cubby/work/$NAME\""; then
+  ok "5 login lands in the home; no work directory is created on the host"
 else
-  ng "5 work directory"
+  ng "5 login dir '$cwd' (home ${hid##* }) or a work directory exists"
 fi
-remote "rm -f '$WORK/ctr-smoke-file'"
 
 # 5b. コンテナ内で git を使える（clone の代わりに init/commit で確かめる。ネットワークに依存しない）
-if out=$(cssh "cd '$WORK' && git init -q demo && cd demo && echo a > a.txt && git add a.txt && git -c user.name=smoke -c user.email=smoke@invalid commit -q -m first && git log --oneline | wc -l" 2>&1) \
+if out=$(cssh "cd ~ && git init -q demo && cd demo && echo a > a.txt && git add a.txt && git -c user.name=smoke -c user.email=smoke@invalid commit -q -m first && git log --oneline | wc -l" 2>&1) \
    && [ "$(printf '%s' "$out" | tr -d ' \r')" = 1 ]; then
-  ok "5b git works inside the container (init/commit in the work directory)"
+  ok "5b git works inside the container (init/commit in the home)"
 else
   ng "5b git in container: $out"
 fi
 
-# 11. コンテナを作り直しても接続でき、ホームと作業ディレクトリが残る
+# 11. コンテナを作り直しても接続でき、ホーム（中のリポジトリも）が残る
 cssh 'echo keep > ~/.ctr-smoke-marker' >/dev/null 2>&1
 remote "podman rm -f $NAME >/dev/null"
-if [ "$(cssh 'cat ~/.ctr-smoke-marker' 2>/dev/null | tr -d '\r')" = keep ] && cssh "test -f '$WORK/demo/a.txt'" >/dev/null 2>&1; then
-  ok "11 reconnect after podman rm -f works; home and work directory are kept"
+if [ "$(cssh 'cat ~/.ctr-smoke-marker' 2>/dev/null | tr -d '\r')" = keep ] && cssh "test -f ~/demo/a.txt" >/dev/null 2>&1; then
+  ok "11 reconnect after podman rm -f works; the home (and repositories in it) is kept"
 else
-  ng "11 reconnect after podman rm -f (home or work directory missing, or connect failed)"
+  ng "11 reconnect after podman rm -f (home content missing, or connect failed)"
 fi
 
 # M. 追加マウント（ホストの ~/.config/cubby/mounts）。設定は変えず、設定済みのものを確かめる
@@ -235,14 +227,14 @@ else
   ng "C1 CLAUDE.md has no cubby block"
 fi
 
-# 12a. ctr-remove: 作業ディレクトリが空でなければ止まり、中の git の未コミットの変更を知らせる
-cssh "echo b > '$WORK/demo/b.txt'" >/dev/null 2>&1
+# 12a. ctr-remove: ホームに未コミットの変更がある git のリポジトリがあれば止まって知らせる
+cssh "echo b > ~/demo/b.txt" >/dev/null 2>&1
 out=$(remote "$RBIN/ctr-remove -y $NAME" 2>&1); rc=$?
-if [ "$rc" != 0 ] && remote "test -d '$WORK'" && [ "$(count_containers)" = 1 ] \
+if [ "$rc" != 0 ] && remote "podman volume exists $NAME-home" && [ "$(count_containers)" = 1 ] \
    && printf '%s\n' "$out" | grep -q 'demo: 1 uncommitted'; then
-  ok "12a ctr-remove stops on a non-empty work directory and reports uncommitted changes in git repos"
+  ok "12a ctr-remove stops when the home has git repositories with uncommitted changes"
 else
-  ng "12a ctr-remove on non-empty work dir: exit=$rc"
+  ng "12a ctr-remove with uncommitted changes in the home: exit=$rc"
   printf '%s\n' "$out" | sed 's/^/      /'
 fi
 
@@ -250,9 +242,8 @@ fi
 if [ "$cleanup" = 1 ]; then
   if remote "$RBIN/ctr-remove -y --force $NAME" >/dev/null 2>&1 \
      && [ "$(count_containers)" = 0 ] \
-     && ! remote "test -e '$WORK'" \
      && ! remote "podman volume exists $NAME-home"; then
-    ok "12b ctr-remove --force removes container, work directory and volume"
+    ok "12b ctr-remove --force removes the container and the home volume"
   else
     ng "12b ctr-remove did not clean up completely"
   fi
@@ -262,10 +253,9 @@ fi
 
 # G. GPU（gpu-<作業名>）。ホストの detected.env の結果に従って確かめる
 GNAME="gpu-${NAME#ctr-}"
-GWORK="$WORK_ROOT/$GNAME"
 gavail=$(remote "sed -n 's/^CTR_GPU_AVAILABLE=//p' \"\${XDG_CONFIG_HOME:-\$HOME/.config}/cubby/detected.env\" 2>/dev/null" | tr -d '\r')
 if [ "$gavail" = yes ]; then
-  if remote "test -e '$GWORK'" || [ "$(remote "podman ps -aq --filter label=ctr.name=$GNAME | wc -l" | tr -d ' \r')" != 0 ]; then
+  if remote "podman volume exists $GNAME-home" || [ "$(remote "podman ps -aq --filter label=ctr.name=$GNAME | wc -l" | tr -d ' \r')" != 0 ]; then
     sk "G1 $GNAME already exists on $REMOTE (remove it first to test GPU containers)"
   else
     out=$(rssh -o BatchMode=yes "$GNAME.$ID" 'hostname; nvidia-smi -L' </dev/null 2>/dev/null | tr -d '\r')
@@ -282,7 +272,7 @@ if [ "$gavail" = yes ]; then
   fi
 else
   rc=$(remote "$RBIN/ctr-connect $GNAME.$ID </dev/null >/dev/null 2>&1; echo \$?" | tr -d '\r')
-  if [ "$rc" = 2 ] && ! remote "test -e '$GWORK'"; then
+  if [ "$rc" = 2 ] && ! remote "podman volume exists $GNAME-home"; then
     ok "G1 no GPU on $REMOTE: $GNAME.$ID is rejected with exit 2 and nothing is created"
   else
     ng "G1 $GNAME.$ID on a host without GPU -> exit $rc"

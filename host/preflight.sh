@@ -8,7 +8,6 @@ if [ -r "$CONF" ]; then
   # shellcheck disable=SC1090
   . "$CONF"
 fi
-WORK_ROOT=${CTR_WORK_ROOT:-$HOME/cubby/work}
 
 run() { printf '\n$ %s\n' "$*"; "$@" 2>&1 || printf '(exit %s)\n' "$?"; }
 
@@ -27,10 +26,4 @@ chk "podman runs rootless" "[ \"\$(podman info --format '{{.Host.Security.Rootle
 chk "/etc/subuid has $(id -un)" "grep -q '^$(id -un):' /etc/subuid 2>/dev/null" "needed for --userns=keep-id"
 chk "linger is enabled" "[ \"\$(loginctl show-user $(id -un) -p Linger --value 2>/dev/null)\" = yes ]" \
     "sudo loginctl enable-linger $(id -un)"
-if [ -d "$WORK_ROOT" ]; then
-  chk "$WORK_ROOT is writable" "[ -w '$WORK_ROOT' ]"
-else
-  p=$(dirname "$WORK_ROOT"); while [ ! -e "$p" ]; do p=$(dirname "$p"); done
-  chk "$WORK_ROOT can be created" "[ -w '$p' ]" "sudo install -d -o $(id -un) $WORK_ROOT"
-fi
 command -v nvidia-smi >/dev/null 2>&1 && chk "NVIDIA driver works" "nvidia-smi -L >/dev/null 2>&1"

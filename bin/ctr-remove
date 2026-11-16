@@ -1,13 +1,12 @@
 #!/bin/sh
 # ctr-remove [-y] [--force] <ctr|gpu>-<work>[.<host-id>]
 #
-# 接続名 <name> のコンテナ・作業ディレクトリ・ホームのボリュームを片付ける。
+# 接続名 <name> のコンテナとホームのボリューム（<name>-home）を片付ける。
 #   -y       確認を省略する
-#   --force  作業ディレクトリに中身があっても消す
+#   --force  ホームの git のリポジトリに未コミットの変更や push していないコミットがあっても消す
 #
-# 作業ディレクトリが空でなければ、何も消す前に止まって中身を表示する。
-# 中に git のリポジトリ（コンテナ内で clone したものなど）があれば、未コミットの変更や
-# push していないコミットがあるかも表示する。
+# ホーム（コンテナ内で clone したリポジトリなど）に、未コミットの変更や push していない
+# コミットのある git のリポジトリがあれば、何も消す前に止まって知らせる。
 set -eu
 
 CONF=${CTR_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/cubby/config.env}
@@ -15,7 +14,6 @@ if [ -r "$CONF" ]; then
   # shellcheck disable=SC1090
   . "$CONF"
 fi
-WORK_ROOT=${CTR_WORK_ROOT:-$HOME/cubby/work}
 
 log() { printf 'ctr-remove: %s\n' "$*" >&2; }
 usage() { echo "usage: ctr-remove [-y] [--force] <name>" >&2; exit 2; }
@@ -41,45 +39,51 @@ case "$name" in
 esac
 [ "${#name}" -le 44 ] || { log "name too long: $name"; exit 2; }
 
-work="$WORK_ROOT/$name"
 vol="$name-home"
 
 has_container=0; podman container exists "$name" >/dev/null 2>&1 && has_container=1
 has_volume=0;    podman volume exists "$vol" >/dev/null 2>&1 && has_volume=1
-has_work=0;      [ -e "$work" ] && has_work=1
 
-if [ "$has_container$has_volume$has_work" = 000 ]; then
+if [ "$has_container$has_volume" = 00 ]; then
   log "nothing to remove for $name"
   exit 0
 fi
 
-# 作業ディレクトリの中の git のリポジトリ（深さ 3 まで）の状態を表示する
+# ホームの git のリポジトリ（深さ 3 まで。隠しディレクトリの下は見ない）のうち、
+# 未コミットの変更か push していないコミットがあるものを表示する。
+# コンテナ内の root が作ったファイルもあるので、podman unshare（ユーザー名前空間の root）で調べる。
 git_report() {
-  find "$1" -maxdepth 3 -name .git 2>/dev/null | while IFS= read -r g; do
-    r=$(dirname "$g")
-    st=$(git -C "$r" status --porcelain 2>/dev/null | wc -l | tr -d ' ')
-    ahead=$(git -C "$r" rev-list --count '@{upstream}..HEAD' 2>/dev/null || echo '?')
-    printf '  git %s: %s uncommitted change(s), %s unpushed commit(s)\n' "$r" "$st" "$ahead"
-  done
+  mp=$(podman volume inspect -f '{{.Mountpoint}}' "$vol" 2>/dev/null) || return 0
+  [ -n "$mp" ] || return 0
+  # shellcheck disable=SC2016
+  podman unshare sh -c '
+    cd "$1" 2>/dev/null || exit 0
+    find . -maxdepth 4 -name .git ! -path "*/.*/*/.git" ! -path "*/.*/.git" 2>/dev/null | while IFS= read -r g; do
+      r=${g%/.git}; r=${r#./}
+      st=$(git -C "$r" status --porcelain 2>/dev/null | wc -l | tr -d " ")
+      ahead=$(git -C "$r" rev-list --count "@{upstream}..HEAD" 2>/dev/null || echo "?")
+      [ "$st" = 0 ] && [ "$ahead" = 0 ] && continue
+      printf "  git ~/%s: %s uncommitted change(s), %s unpushed commit(s)\n" "$r" "$st" "$ahead"
+    done' sh "$mp"
 }
 
 # 1. 対象を表示し、確認を求める
 echo "remove targets for $name:"
 [ "$has_container" = 1 ] && echo "  container: $name"
-[ "$has_work" = 1 ]      && echo "  work dir:  $work"
-[ "$has_volume" = 1 ]    && echo "  volume:    $vol (home: Claude Code sessions, settings)"
+[ "$has_volume" = 1 ]    && echo "  volume:    $vol (home: Claude Code sessions, settings, cloned repositories)"
 
-# 作業ディレクトリが空でなければ、何も消す前に止める（--force 指定時を除く）
-if [ "$has_work" = 1 ] && [ -n "$(ls -A "$work" 2>/dev/null)" ]; then
-  report=$(git_report "$work")
-  if [ "$force" = 0 ]; then
-    log "work directory $work is not empty; nothing was removed."
-    log "move or push what you need, then rerun; or use --force to delete it. contents:"
-    ls -A "$work" | head -n 20 | sed 's/^/  /' >&2
-    [ -z "$report" ] || printf '%s\n' "$report" >&2
-    exit 1
+if [ "$has_volume" = 1 ]; then
+  report=$(git_report)
+  if [ -n "$report" ]; then
+    if [ "$force" = 0 ]; then
+      log "the home has git repositories with uncommitted or unpushed work; nothing was removed."
+      log "push what you need (or use ctr-recreate to keep the home), then rerun; or use --force to delete it."
+      printf '%s\n' "$report" >&2
+      exit 1
+    fi
+    echo "  (--force) git repositories with unsaved work that will be deleted:"
+    printf '%s\n' "$report"
   fi
-  [ -z "$report" ] || { echo "  (--force) git repositories that will be deleted:"; printf '%s\n' "$report"; }
 fi
 
 if [ "$yes" = 0 ]; then
@@ -97,14 +101,7 @@ if [ "$has_container" = 1 ]; then
   log "removed container $name"
 fi
 
-# 3. 作業ディレクトリ（コンテナ内の root が作ったファイルはホストでは subuid の所有に
-#    なるので、podman unshare で消す）
-if [ "$has_work" = 1 ]; then
-  podman unshare rm -rf -- "$work"
-  log "removed work directory $work"
-fi
-
-# 4. ホームのボリューム
+# 3. ホームのボリューム
 if [ "$has_volume" = 1 ]; then
   podman volume rm "$vol" >/dev/null
   log "removed volume $vol"

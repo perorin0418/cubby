@@ -1,5 +1,5 @@
 #!/bin/sh
-# host/setup-host.sh [--id ID] [--work-root PATH] [--pubkeys FILE|-] [--rebuild] [--gpu auto|off]
+# host/setup-host.sh [--id ID] [--pubkeys FILE|-] [--rebuild] [--gpu auto|off]
 #                    [--mount SPEC]... [--unmount PATH]...
 #
 # リモートホストの準備。ログインユーザーで実行する（sudo 不要・rootless Podman）。
@@ -9,7 +9,6 @@
 #   ~/.config/cubby/config.env          なければ作る（既存の値は変えない）
 #   ~/.config/cubby/hostkeys/           全コンテナ共通のホスト鍵。なければ作る（上書きしない）
 #   ~/.config/cubby/authorized_keys/<ユーザー名> 渡された公開鍵のうち未登録の行だけ追記する
-#   作業ディレクトリの置き場             なければ作る（既定 ~/cubby/work）
 #   ~/.local/bin/ctr-*                  スクリプトを設置する
 #   ~/.config/cubby/mounts              --mount / --unmount を反映する
 #   イメージ                             なければビルドする（--rebuild で作り直す）
@@ -27,7 +26,7 @@ log()  { printf 'setup-host: %s\n' "$*" >&2; }
 warn() { printf 'setup-host: WARNING: %s\n' "$*" >&2; }
 die()  { printf 'setup-host: ERROR: %s\n' "$*" >&2; exit 1; }
 
-id_arg= work_arg= pubkeys= rebuild=0 gpu_mode=auto
+id_arg= pubkeys= rebuild=0 gpu_mode=auto
 add_mounts= del_mounts=
 auto_url= auto_branch= auto_interval= auto_off=0
 nl='
@@ -42,7 +41,7 @@ while [ $# -gt 0 ]; do
     --mount)     add_mounts="$add_mounts$2$nl"; shift 2 ;;
     --unmount)   del_mounts="$del_mounts$2$nl"; shift 2 ;;
     --id)        id_arg=$2; shift 2 ;;
-    --work-root) work_arg=$2; shift 2 ;;
+    --work-root) shift 2 ;;   # 旧版のクライアントとの互換のため受け付けて無視する
     --pubkeys)   pubkeys=$2; shift 2 ;;
     --rebuild)   rebuild=1; shift ;;
     *) die "unknown option: $1" ;;
@@ -61,20 +60,17 @@ chmod 700 "$CONF_DIR"
 # 設定ファイル（既存の値は変えない。食い違いは警告する）
 if [ ! -e "$CONF" ]; then
   sed -e "s|^CTR_HOST_ID=.*|CTR_HOST_ID=${id_arg}|" \
-      -e "s|^CTR_WORK_ROOT=.*|CTR_WORK_ROOT=${work_arg:-$HOME/cubby/work}|" \
       "$here/config.env.example" > "$CONF"
   log "created $CONF"
 fi
 # shellcheck disable=SC1090
 . "$CONF"
-WORK_ROOT=${CTR_WORK_ROOT:-$HOME/cubby/work}
 IMAGE=${CTR_IMAGE:-localhost/ctr-dev:latest}
 HOSTKEYS=${CTR_HOSTKEYS:-$CONF_DIR/hostkeys}
 AUTHKEYS=${CTR_AUTHKEYS:-$CONF_DIR/authorized_keys}
 BIN_DIR=${CTR_BIN_DIR:-$HOME/.local/bin}
 keep() { [ -z "$2" ] || [ "$2" = "$3" ] || warn "$CONF keeps $1=$3 (requested $2); edit it by hand to change"; }
 keep CTR_HOST_ID "$id_arg" "${CTR_HOST_ID:-}"
-keep CTR_WORK_ROOT "$work_arg" "$WORK_ROOT"
 
 # ホスト鍵（rootless なのでログインユーザー所有。既にあれば作り直さない）
 mkdir -p "$HOSTKEYS" "$AUTHKEYS"
@@ -116,14 +112,6 @@ if [ -n "$pubkeys" ]; then
   log "authorized_keys: $added key(s) added to $ak"
 fi
 [ -s "$ak" ] || warn "$ak is empty; nobody can log in to the containers yet"
-
-# 作業ディレクトリの置き場（各コンテナの作業ディレクトリ <置き場>/<名前> はここに作られる）
-if [ ! -d "$WORK_ROOT" ]; then
-  mkdir -p "$WORK_ROOT" 2>/dev/null \
-    || die "cannot create $WORK_ROOT; ask an admin: sudo install -d -o $(id -un) $WORK_ROOT"
-  log "created $WORK_ROOT"
-fi
-[ -w "$WORK_ROOT" ] || die "$WORK_ROOT is not writable by $(id -un)"
 
 # スクリプト
 mkdir -p "$BIN_DIR"

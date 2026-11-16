@@ -22,18 +22,17 @@ write_claude_md() {
   # shellcheck disable=SC1091
   os=$(. /etc/os-release 2>/dev/null; echo "${PRETTY_NAME:-Linux}")
   if command -v apt-get >/dev/null 2>&1; then pkg="sudo apt-get install -y <パッケージ>"; else pkg="sudo dnf install -y <パッケージ>"; fi
-  work=${CTR_WORK:-}
   block=$(mktemp)
   {
     echo '<!-- >>> cubby: この区切りの中はコンテナの起動のたびに自動で書き換わります。書き足すなら区切りの外へ >>> -->'
     echo '# この環境について（cubby）'
     echo
     echo "- ここは **$os** のコンテナです（ホストと同じ OS・版）。Claude Code はこのコンテナの中で動いています。"
-    echo "- 作業ディレクトリ: \`$work\`（ホストと同じパス）。ホームはこのコンテナ専用で、ホストのホームとは別です。"
+    echo "- ホーム（\`$h\`）はこのコンテナ専用で、ホストのホームとは別です。コンテナを作り直しても残ります。リポジトリの clone などはホームの下で行ってください。"
     echo "- \`sudo\` はパスワードなしで使えます。OS のパッケージは \`$pkg\` で入れられます（コンテナを作り直すと消えます）。"
     echo '- 入っているツール: go, java (Temurin 21), node/npm/npx (LTS), python3/pip3/venv, jq, yq, kubectl, helm, aws, docker/docker compose, git, curl。'
     if [ -S /var/run/docker.sock ]; then
-      echo '- `docker` はホストの Podman につながっています。起動したコンテナはホスト上の兄弟のコンテナになります（`localhost` で使うなら `--network container:$(hostname)`）。'
+      echo '- `docker` はホストの Podman につながっています。起動したコンテナはホスト上の兄弟のコンテナになります（`localhost` で使うなら `--network container:$(hostname)`）。ホームはホストからは見えないので、ホームのファイルを渡すなら `-v` ではなく `--volumes-from $(hostname)`（このコンテナと同じホーム・マウントになる）を使ってください。'
     fi
     echo '<!-- <<< cubby <<< -->'
   } > "$block"
@@ -88,7 +87,7 @@ if [ -n "${CTR_USER:-}" ] && [ -n "${CTR_UID:-}" ] && [ -n "${CTR_GID:-}" ] && [
   if [ "$(stat -c %u "$home")" != "$uid" ]; then
     chown "$uid:$gid" "$home" || true
   fi
-  # ホームの下のマウント（作業ディレクトリ・追加マウント）のために podman が作った途中の
+  # ホームの下のマウント（追加マウント）のために podman が作った途中の
   # ディレクトリ（例 ~/.cache、~/cubby）は root の所有になるので、利用者が中に書けるよう所有者を直す。
   # マウントそのもの（ホストのディレクトリ）には触らない。
   sed 's/\\040/ /g' /proc/self/mountinfo | awk '{print $5}' | while IFS= read -r m; do
