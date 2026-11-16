@@ -228,41 +228,11 @@ else
   remote "podman exec $NAME ps -eo pid,etimes,args=" 2>/dev/null | sed 's/^/      /'
 fi
 
-# K. 作業ごとのコンテナ（cubby-task）。ホストの Podman の API ソケットがあるときだけ
-if [ -z "$hsock" ]; then
-  sk "K1-K4 task containers need the host podman socket"
+# C1. ~/.claude/CLAUDE.md に、この環境（OS・入っているツール）の説明が書かれている
+if cssh 'grep -q "この環境について（cubby）" ~/.claude/CLAUDE.md' >/dev/null 2>&1; then
+  ok "C1 ~/.claude/CLAUDE.md describes the environment"
 else
-  # K1: 作業 a で実行でき、作業フォルダが作業用コンテナとホストで共有される
-  k1=$(cssh "cubby-task sh smoke-a 'echo from-task > out.txt; hostname'; cat \"\$(cubby-task path smoke-a)/out.txt\"" 2>/dev/null | tr -d '\r')
-  host_file=$(remote "cat '$WORK/tasks/smoke-a/out.txt'" 2>/dev/null | tr -d '\r')
-  if [ "$(printf '%s\n' "$k1" | head -n 1)" = smoke-a ] && [ "$(printf '%s\n' "$k1" | tail -n 1)" = from-task ] && [ "$host_file" = from-task ]; then
-    ok "K1 cubby-task runs commands in a task container; its folder is shared with the container and the host"
-  else
-    ng "K1 cubby-task: '$(printf '%s' "$k1" | tr '\n' '|')' host '$host_file'"
-  fi
-  # K2: 作業 a で入れたものや作ったものは、作業 b からは見えない
-  k2=$(cssh "cubby-task sh smoke-a 'touch /root/only-a'; cubby-task sh smoke-b 'test -e /root/only-a && echo leaked || echo isolated; ls ..' " 2>/dev/null | tr -d '\r')
-  case "$k2" in
-    isolated*) printf '%s\n' "$k2" | grep -qx 'smoke-a' && ng "K2 task b can see task a's folder: $k2" \
-                 || ok "K2 tasks are isolated from each other (environment and folders)" ;;
-    *) ng "K2 isolation: $k2" ;;
-  esac
-  # K3: 72 時間使っていないものだけ消える（印の時刻を古くして確かめる。作業フォルダは残る）
-  remote "touch -d '73 hours ago' '$WORK/tasks/.smoke-a.last-used'; .local/bin/ctr-task-gc >/dev/null 2>&1"
-  ka=$(remote "podman container exists $NAME--smoke-a && echo kept || echo removed")
-  kb=$(remote "podman container exists $NAME--smoke-b && echo kept || echo removed")
-  kf=$(remote "test -f '$WORK/tasks/smoke-a/out.txt' && echo folder-kept || echo folder-gone")
-  if [ "$ka" = removed ] && [ "$kb" = kept ] && [ "$kf" = folder-kept ]; then
-    ok "K3 ctr-task-gc removes task containers unused for 72h (folder kept) and keeps recent ones"
-  else
-    ng "K3 gc: smoke-a $ka, smoke-b $kb, $kf"
-  fi
-  # K4: CLAUDE.md に作業用コンテナの指示が書かれている
-  if cssh 'grep -q "cubby-task sh" ~/.claude/CLAUDE.md' >/dev/null 2>&1; then
-    ok "K4 ~/.claude/CLAUDE.md tells Claude to use task containers"
-  else
-    ng "K4 CLAUDE.md has no task container instructions"
-  fi
+  ng "C1 CLAUDE.md has no cubby block"
 fi
 
 # 12a. ctr-remove: 作業ディレクトリが空でなければ止まり、中の git の未コミットの変更を知らせる

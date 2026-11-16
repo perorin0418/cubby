@@ -47,11 +47,8 @@ vol="$name-home"
 has_container=0; podman container exists "$name" >/dev/null 2>&1 && has_container=1
 has_volume=0;    podman volume exists "$vol" >/dev/null 2>&1 && has_volume=1
 has_work=0;      [ -e "$work" ] && has_work=1
-# このコンテナの作業用コンテナ（cubby-task が作ったもの）
-tasks=$(podman ps -a --filter "label=cubby.task.owner=$name" --format '{{.Names}}' 2>/dev/null | tr '
-' ' ')
 
-if [ "$has_container$has_volume$has_work" = 000 ] && [ -z "${tasks# }" ]; then
+if [ "$has_container$has_volume$has_work" = 000 ]; then
   log "nothing to remove for $name"
   exit 0
 fi
@@ -69,7 +66,6 @@ git_report() {
 # 1. 対象を表示し、確認を求める
 echo "remove targets for $name:"
 [ "$has_container" = 1 ] && echo "  container: $name"
-[ -z "${tasks# }" ]       || echo "  task containers: $tasks"
 [ "$has_work" = 1 ]      && echo "  work dir:  $work"
 [ "$has_volume" = 1 ]    && echo "  volume:    $vol (home: Claude Code sessions, settings)"
 
@@ -95,10 +91,7 @@ if [ "$yes" = 0 ]; then
   esac
 fi
 
-# 2. コンテナ（作業用コンテナも）
-for t in $tasks; do
-  podman rm -f "$t" >/dev/null 2>&1 && log "removed task container $t"
-done
+# 2. コンテナ
 if [ "$has_container" = 1 ]; then
   podman rm -f "$name" >/dev/null
   log "removed container $name"

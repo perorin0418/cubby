@@ -56,8 +56,6 @@ bin/ctr-list            コンテナ・ボリューム・作業ディレクト�
 bin/ctr-remove          片付け（ホスト側）
 bin/ctr-recreate        コンテナだけを作り直す（マウントの設定の反映。ホスト側）
 bin/ctr-sync            自動更新の本体（リポジトリの最新を取得して反映する。ホスト側）
-bin/ctr-task-gc         72 時間使われていない作業用コンテナを消す（ホスト側。1 時間ごとのタイマー）
-image/cubby-task        作業用コンテナを使うコマンド（コンテナ内）
 bin/ctr-common.sh       ホスト側のスクリプトが共有する部分（追加マウントの解釈）
 host/bootstrap-root.sh  root が要るホストの準備（cubby add-host が必要なときだけ sudo で実行する）
 host/setup-host.sh      ホストの準備（cubby add-host が自動で実行する）
@@ -186,32 +184,12 @@ cubby はリポジトリを管理しません。各コンテナには空の作�
 - ほかに必要なものは `image/Dockerfile` に追記して push します（「コンテナイメージのカスタマイズ」を参照）。そのコンテナだけで使うなら `sudo apt-get install ...` でも入れられます（作り直すと消えます）。
 - イメージは約 2.4 GB で、ホストでの初回のビルドには数分かかります。
 
-## 作業ごとのコンテナ（庶務A・庶務B などを分ける）
+## Desktop のセッションとコンテナ
 
-Desktop の接続は 1 つのまま、**依頼（作業）ごとに別々のコンテナ**でコマンドを実行できます。Claude Code の動くコンテナ（接続名のコンテナ）から、作業ごとの **作業用コンテナ** を docker で作り、コマンドはその中で実行します。
+コンテナは **接続名ごと** に 1 つです。Claude Desktop は接続を 1 本張ったまま、その上でセッションを増やします（セッションごとに、コンテナの中で Claude Code がもう 1 つ起動します）。そのため、同じ接続名のセッションはすべて同じコンテナに入ります。
 
-```
-Desktop ── ctr-office.lab1（Claude Code が動くコンテナ。接続は 1 つ）
-              ├─ ctr-office--shomu-a（庶務A の作業用コンテナ）… 作業フォルダ ~/cubby/work/ctr-office/tasks/shomu-a
-              └─ ctr-office--shomu-b（庶務B の作業用コンテナ）… 作業フォルダ ~/cubby/work/ctr-office/tasks/shomu-b
-```
-
-- **Claude が自動で使います**。コンテナの起動時に `~/.claude/CLAUDE.md` へ使い方を書くので、Claude は依頼ごとに作業名（例 庶務A → `shomu-a`）を決め、コマンドを `cubby-task sh shomu-a '...'` で作業用コンテナの中で実行します。作業名が分からなければ Claude が確認します。
-- 作業用コンテナから見えるのは、その作業のフォルダだけです（同じパスで共有）。ほかの作業のフォルダや、Claude Code のコンテナのホームは見えません。作業用コンテナの中は root で、`apt-get` / `dnf` で自由にパッケージを入れても、ほかの作業に影響しません。
-- **最後に使ってから 72 時間で、作業用コンテナは自動で消えます**（ホストのタイマーが 1 時間ごとに確認。コマンドの実行中のものは消しません）。**作業フォルダは残ります**。同じ作業名でまた使えば、作業用コンテナが作り直されます（入れたパッケージは入れ直しになります）。時間はホストの `config.env` の `CTR_TASK_TTL_HOURS` で変えられます。
-- 手で使う場合（Claude Code のコンテナの中で）:
-
-| コマンド | 内容 |
-|---|---|
-| `cubby-task sh <作業名> '<コマンド>'` | 作業用コンテナの中でコマンドを実行する（初回に作られる） |
-| `cubby-task exec <作業名> -- <コマンド> [引数...]` | 同上（引数をそのまま渡す） |
-| `cubby-task start <作業名>` / `path <作業名>` | 作業用コンテナを用意する / 作業フォルダのパスを表示する |
-| `cubby-task list` | 作業用コンテナの一覧（最後に使った日時） |
-| `cubby-task rm <作業名>` | 作業用コンテナを消す（作業フォルダは残す） |
-
-- ホストの Podman の API ソケットが必要です（「コンテナの中から別のコンテナを起動する」と同じ条件。systemd のあるホスト）。
-- 接続名のコンテナを `ctr-remove` で消すと、その作業用コンテナも消えます。
-- 作業用コンテナは、Claude Code のコンテナと同じイメージ（ホストと同じ OS・開発ツール入り）から作ります。
+- 会話（Claude Code のプロセス）はセッションごとに分かれますが、ファイル・入れたパッケージ・起動したプログラムは共通です。
+- 環境を分けたい作業は、Desktop で別の接続名（例 `ctr-shomu-a.lab1`、`ctr-shomu-b.lab1`）を使ってください。接続名ごとに別のコンテナ・ホーム・作業ディレクトリになります。
 
 ## コンテナの中から別のコンテナを起動する
 
@@ -428,7 +406,6 @@ macOS・Linux・Git Bash は `sh client/cubby ...`、Windows の PowerShell は 
 | `ctr-list` | このホストのコンテナ・ボリューム・追加マウント（設定が古いコンテナ）・作業ディレクトリ（中のリポジトリのブランチと未コミットの変更の数）を一覧する |
 | `ctr-remove [-y] [--force] <名前>` | コンテナ・作業ディレクトリ・ホームのボリュームを消す。作業ディレクトリが空でなければ、何も消さずに止まる（中のリポジトリの未コミット・未 push も表示）。`-y` で確認を省略、`--force` で中身があっても消す |
 | `ctr-recreate [-y] <名前>` | コンテナだけを作り直す（ホームと作業ディレクトリは残る）。次の接続で今の設定（追加マウント・sudo など）のコンテナが作られる。`-y` で確認を省略 |
-| `ctr-task-gc [--dry-run]` | 最後に使ってから `CTR_TASK_TTL_HOURS` 時間（既定 72）たった作業用コンテナを消す（タイマーから 1 時間ごとに実行される）。`--dry-run` で消す対象だけを表示 |
 | `ctr-sync [--force]` | 自動更新の本体。cubby のリポジトリを取得し、新しいコミットがあれば反映する（タイマーから定期的に実行される。手で実行すればすぐ反映）。`--force` でコミットが同じでも反映し直す |
 | `ctr-connect <接続名>` | ssh_config の ProxyCommand から呼ばれる本体。手で実行するのは調査のときだけ（例 `ctr-connect ctr-x.lab1 </dev/null \| head -c 8` が `SSH-2.0-` を返すか） |
 
@@ -469,7 +446,6 @@ sh tests/smoke.sh <id> [--cleanup]
 | `CTR_IMAGE` | `localhost/ctr-dev:latest` | コンテナイメージ |
 | `CTR_GPU_ARGS` | `--device nvidia.com/gpu=all` | `gpu-` のコンテナに付ける podman の引数（例 AMD は `--device /dev/kfd --device /dev/dri --group-add keep-groups`） |
 | `CTR_SUDO` | `yes` | `no` にするとコンテナ内の sudo を許可しない |
-| `CTR_TASK_TTL_HOURS` | `72` | 作業用コンテナを、最後に使ってから何時間で自動で消すか（作業フォルダは残る） |
 | `CTR_AUTO_RECREATE` | `yes` | `no` にすると、古くなったコンテナを接続時に自動で作り直さない（`ctr-recreate` で手動） |
 | `CTR_BASE_IMAGE` | ホストの OS に合わせて選ぶ | コンテナのベースイメージを固定する（例 `docker.io/library/debian:12-slim`） |
 | `CTR_HOST_PODMAN` | `yes` | `no` にするとホストの Podman の API ソケットをコンテナに渡さない（コンテナ内の docker が使えなくなる） |
@@ -491,8 +467,6 @@ sh tests/smoke.sh <id> [--cleanup]
 | `~/.config/cubby/deploy_key` | 非公開リポジトリを取得するための読み取り専用のデプロイキー（非公開のときだけ） |
 | `~/.config/systemd/user/cubby-sync.{service,timer}` | 自動更新のタイマー |
 | `~/.local/state/cubby/sync.log` | 自動更新のログ |
-| `~/.local/state/cubby/task-gc.log` | 作業用コンテナの自動削除のログ |
-| `~/.config/systemd/user/cubby-task-gc.{service,timer}` | 作業用コンテナの自動削除のタイマー（1 時間ごと） |
 
 ### 手元の環境変数
 
@@ -521,8 +495,6 @@ sh tests/smoke.sh <id> [--cleanup]
 | `docker run -v ~/...` で中身が空 | ホームの下は作業ディレクトリと `--mount` のもの以外ホストにない。作業ディレクトリの中に置く |
 | `containers still using an older image` / `the image was rebuilt since ...` | イメージを作り直した後、古いイメージのままのコンテナがある。次の接続のとき（誰もつないでいなければ）自動で作り直される。Desktop は接続を張ったままなので、開いている間は作り直されない。すぐなら手元で `cubby recreate ctr-<名前>.<id>` |
 | Claude が「Python がない」「dnf がない」など、入っているはずのものがないと言う | そのコンテナが古いイメージのまま（`cubby list` の `containers still using an older image`）。`cubby recreate ctr-<名前>.<id>` してつなぎ直す |
-| `cubby-task: the host podman socket is not available` | ホストの Podman の API ソケットがない（`ctr-list` の `docker in containers:`）。systemd のないホストでは作業用コンテナは使えない |
-| Claude が作業用コンテナを使わない | `~/.claude/CLAUDE.md` の cubby の区切りがあるか（コンテナの起動時に書かれる）。古いコンテナなら作り直す。Claude に「cubby-task で作業して」と伝えてもよい |
 | `mount settings changed since ...` | マウントの設定が変わった。反映するならホストで `ctr-recreate <名前>` |
 | `sudo: a password is required` | ホストの `config.env` が `CTR_SUDO=no` になっていないか。旧版のイメージで作ったコンテナなら `cubby update <id>` の後に `ctr-recreate <名前>` |
 | `work directory ... is not empty` | `ctr-remove` の安全装置。中身（とリポジトリの未コミット・未 push）を確かめてから、移すか `--force` |
@@ -564,7 +536,6 @@ sh tests/smoke.sh <id> [--cleanup]
 | マウントは repo の `.git`・worktree・ホーム・鍵のみ | ホストごとの `~/.config/cubby/mounts` で任意のディレクトリを全コンテナにマウント。`cubby add-host --mount/--unmount`、反映は `ctr-recreate` | 利用者の要望 |
 | — | `~/.ssh/config` の書き換えを mkdir のロックで排他し、別のファイルに書いてから置き換える | 複数の `add-host` を同時に動かすと、互いのブロックを上書きしたり、書き換え中のファイルを ssh が読んで失敗したりしたため（検証で判明） |
 | コンテナ内に `dev` ユーザーを作り（UID/GID をホストに合わせてイメージをビルド）、`dev` でログイン | ユーザーは作らない。起動時にホストのログインユーザー（同じ名前・UID・GID・ホームのパス）をコンテナの `/etc/passwd` に登録し、その名前でログインする。イメージはホストに依存しない（版のラベルで古いイメージを自動で作り直す） | 権限の食い違いを避けるため（利用者の要望） |
-| 接続名ごとのコンテナだけ | 1 つの接続の中で、作業ごとに作業用コンテナ（`cubby-task`）を作る。72 時間使われなければ自動で消す（作業フォルダは残す）。Claude への指示を `~/.claude/CLAUDE.md` に自動で書く | 庶務ごとに Desktop の接続を分けずに済むように（利用者の要望）。Desktop はセッションを SSH に区別して伝えないので、セッション＝コンテナにはできないため |
 | ベースイメージは Debian 固定 | ホストの OS と同じディストリビューション・版をベースにする（Dockerfile は 1 つで apt / dnf を切り替える） | Claude がホストのカーネル名から OS を誤認するため（利用者の要望） |
 | 古いコンテナの作り直しは手作業（`ctr-recreate`） | 接続時に、誰もつないでいなければ自動で作り直す（認証済みの SSH セッションの有無で判断） | 利用者の要望 |
 | 開発ツールなし（sshd・git・curl のみ） | Go・Java 21・Node.js LTS・Python・jq・yq・kubectl・helm・AWS CLI を入れる | 利用者の要望 |

@@ -127,11 +127,11 @@ fi
 
 # スクリプト
 mkdir -p "$BIN_DIR"
-for f in ctr-connect ctr-list ctr-remove ctr-recreate ctr-sync ctr-task-gc ctr-common.sh; do
+for f in ctr-connect ctr-list ctr-remove ctr-recreate ctr-sync ctr-common.sh; do
   mode=755; case "$f" in *.sh) mode=644 ;; esac
   cp "$here/bin/$f" "$BIN_DIR/$f.tmp" && chmod "$mode" "$BIN_DIR/$f.tmp" && mv -f "$BIN_DIR/$f.tmp" "$BIN_DIR/$f"
 done
-log "installed ctr-connect ctr-list ctr-remove ctr-recreate ctr-sync ctr-task-gc to $BIN_DIR"
+log "installed ctr-connect ctr-list ctr-remove ctr-recreate ctr-sync to $BIN_DIR"
 
 # 自動更新（ctr-sync を定期的に実行して、リポジトリの最新を反映する）
 AU="$CONF_DIR/auto-update.env"
@@ -215,40 +215,17 @@ EOF
   fi
 fi
 
-# 作業用コンテナの自動削除（ctr-task-gc を 1 時間ごとに実行する。常に入れる）
-gc_mode=none
-if command -v systemctl >/dev/null 2>&1 && user_systemctl show-environment >/dev/null 2>&1; then
-  mkdir -p "$UNIT_DIR"
-  cat > "$UNIT_DIR/cubby-task-gc.service" <<EOF
-[Unit]
-Description=cubby: remove task containers unused for ${CTR_TASK_TTL_HOURS:-72}h
-
-[Service]
-Type=oneshot
-ExecStart=$BIN_DIR/ctr-task-gc
-EOF
-  cat > "$UNIT_DIR/cubby-task-gc.timer" <<EOF
-[Unit]
-Description=cubby: check task containers every hour
-
-[Timer]
-OnBootSec=10min
-OnUnitActiveSec=1h
-RandomizedDelaySec=5min
-Persistent=true
-
-[Install]
-WantedBy=timers.target
-EOF
-  user_systemctl daemon-reload && user_systemctl enable --now cubby-task-gc.timer >/dev/null 2>&1 \
-    && gc_mode="systemd timer (hourly)" || warn "could not enable the systemd user timer cubby-task-gc.timer"
-elif command -v crontab >/dev/null 2>&1; then
-  { crontab -l 2>/dev/null | grep -v 'ctr-task-gc'; echo "17 * * * * $BIN_DIR/ctr-task-gc >/dev/null 2>&1"; } | crontab - \
-    && gc_mode="cron (hourly)" || warn "could not install a crontab entry for ctr-task-gc"
-else
-  warn "neither a systemd user session nor cron is available; task containers are not removed automatically (run ctr-task-gc yourself)"
+# 旧版が入れた作業用コンテナの自動削除（ctr-task-gc）を取り除く（作業用コンテナの仕組みは廃止）
+if [ -e "$UNIT_DIR/cubby-task-gc.timer" ]; then
+  user_systemctl disable --now cubby-task-gc.timer >/dev/null 2>&1 || true
+  rm -f "$UNIT_DIR/cubby-task-gc.timer" "$UNIT_DIR/cubby-task-gc.service"
+  user_systemctl daemon-reload >/dev/null 2>&1 || true
+  log "removed the old cubby-task-gc timer"
 fi
-log "task containers: removed after ${CTR_TASK_TTL_HOURS:-72}h unused ($gc_mode)"
+if command -v crontab >/dev/null 2>&1 && crontab -l 2>/dev/null | grep -q 'ctr-task-gc'; then
+  crontab -l 2>/dev/null | grep -v 'ctr-task-gc' | crontab - || true
+fi
+rm -f "$BIN_DIR/ctr-task-gc"
 
 # 追加マウント（~/.config/cubby/mounts）。--mount は同じホストのパスの行を置き換えて追記、
 # --unmount はそのホストのパスの行を消す。手で書いた他の行やコメントは残す。
