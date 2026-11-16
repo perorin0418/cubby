@@ -31,6 +31,11 @@ write_claude_md() {
     echo "- ホーム（\`$h\`）はこのコンテナ専用で、ホストのホームとは別です。コンテナを作り直しても残ります。リポジトリの clone などはホームの下で行ってください。"
     echo "- \`sudo\` はパスワードなしで使えます。OS のパッケージは \`$pkg\` で入れられます（コンテナを作り直すと消えます）。"
     echo '- 入っているツール: go, java (Temurin 21), node/npm/npx (LTS), python3/pip3/venv, jq, yq, kubectl, helm, aws, docker/docker compose, git, curl。'
+    if [ -e /dev/kfd ] || ls /dev/dri/renderD* >/dev/null 2>&1; then
+      echo '- **AMD の GPU が使えます**（`/dev/dri`・`/dev/kfd` を渡してあります）。Vulkan（Mesa RADV）が入っています（`vulkaninfo --summary`）。LLM なら llama.cpp の Vulkan 版（`-DGGML_VULKAN=ON` でビルド。`sudo dnf/apt-get install` で `glslc`・Vulkan の開発用パッケージが要る）などで GPU を使えます。ROCm は入っていません（必要なら ROCm のイメージを `docker run --device /dev/kfd --device /dev/dri ...` で使う）。'
+    elif command -v nvidia-smi >/dev/null 2>&1; then
+      echo '- **NVIDIA の GPU が使えます**（`nvidia-smi`）。'
+    fi
     if [ -S /var/run/docker.sock ]; then
       echo '- `docker` はホストの Podman につながっています。起動したコンテナはホスト上の兄弟のコンテナになります（`localhost` で使うなら `--network container:$(hostname)`）。ホームはホストからは見えないので、ホームのファイルを渡すなら `-v` ではなく `--volumes-from $(hostname)`（このコンテナと同じホーム・マウントになる）を使ってください。'
     fi

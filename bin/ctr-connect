@@ -9,7 +9,8 @@
 # ドット以降はホストの選択に使うだけで、コンテナ名・ホームのボリューム名には
 # ctr-<作業名> / gpu-<作業名> を使う。config.env の CTR_HOST_ID が設定されていれば、
 # ホストID が一致しない接続は拒否する（接続先の取り違え防止）。
-# gpu- のコンテナには CTR_GPU_ARGS（既定: NVIDIA の CDI デバイス nvidia.com/gpu=all）を付ける。
+# gpu- のコンテナには CTR_GPU_ARGS を付ける（既定: setup-host.sh が検出したもの。AMD なら
+# --device /dev/dri/renderD* --device /dev/kfd、NVIDIA なら CDI のデバイス nvidia.com/gpu=all）。
 # setup-host.sh がこのホストで GPU を使えないと判定した場合（detected.env）は拒否する。
 #
 # コンテナのホームは接続名ごとのボリューム <名前>-home（ホストのホームと同じパスにマウント）。
@@ -37,7 +38,7 @@ AUTHKEYS=${CTR_AUTHKEYS:-$CONF_DIR/authorized_keys}
 LOCK_DIR=${CTR_LOCK_DIR:-${XDG_RUNTIME_DIR:-/tmp/cubby-$(id -u)}/cubby-locks}
 HOST_ID=${CTR_HOST_ID:-}
 GPU_AVAILABLE=${CTR_GPU_AVAILABLE:-no}
-GPU_ARGS=${CTR_GPU_ARGS:---device nvidia.com/gpu=all}
+GPU_ARGS=${CTR_GPU_ARGS:-${CTR_GPU_AUTO_ARGS:---device nvidia.com/gpu=all}}
 
 log() { printf 'ctr-connect: %s\n' "$*" >&2; }
 # shellcheck source=bin/ctr-common.sh

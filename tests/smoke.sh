@@ -258,9 +258,15 @@ if [ "$gavail" = yes ]; then
   if remote "podman volume exists $GNAME-home" || [ "$(remote "podman ps -aq --filter label=ctr.name=$GNAME | wc -l" | tr -d ' \r')" != 0 ]; then
     sk "G1 $GNAME already exists on $REMOTE (remove it first to test GPU containers)"
   else
-    out=$(rssh -o BatchMode=yes "$GNAME.$ID" 'hostname; nvidia-smi -L' </dev/null 2>/dev/null | tr -d '\r')
-    if printf '%s\n' "$out" | head -n 1 | grep -qx "$GNAME" && printf '%s\n' "$out" | grep -q '^GPU 0'; then
-      ok "G1 $GNAME.$ID sees the GPU: $(printf '%s\n' "$out" | grep -m1 '^GPU 0')"
+    gvendor=$(remote 'sed -n "s/^CTR_GPU_VENDOR=//p" "${XDG_CONFIG_HOME:-$HOME/.config}/cubby/detected.env"' | tr -d "\r'")
+    case "$gvendor" in
+      amd) gcmd="vulkaninfo --summary 2>/dev/null | sed -n 's/^ *deviceName *= *//p' | grep -vi llvmpipe | head -n 1" ;;
+      *)   gcmd="nvidia-smi -L | grep -m1 '^GPU 0'" ;;
+    esac
+    out=$(rssh -o BatchMode=yes "$GNAME.$ID" "hostname; $gcmd" </dev/null 2>/dev/null | tr -d '\r')
+    gline=$(printf '%s\n' "$out" | sed -n 2p)
+    if printf '%s\n' "$out" | head -n 1 | grep -qx "$GNAME" && [ -n "$gline" ]; then
+      ok "G1 $GNAME.$ID sees the GPU (${gvendor:-nvidia}): $gline"
     else
       ng "G1 $GNAME.$ID: $out"
     fi

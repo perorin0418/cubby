@@ -25,14 +25,16 @@ RUN set -eu; \
       apt-get install -y --no-install-recommends \
         openssh-server netcat-openbsd git ca-certificates curl bash sudo \
         gnupg jq unzip xz-utils less procps libatomic1 tar gzip \
-        python3 python3-pip python3-venv; \
+        python3 python3-pip python3-venv \
+        mesa-vulkan-drivers libvulkan1 vulkan-tools; \
       rm -rf /var/lib/apt/lists/*; \
       mkdir -p /run/sshd; \
     elif command -v dnf >/dev/null 2>&1; then \
       dnf install -y --setopt=install_weak_deps=False \
         openssh-server nmap-ncat git-core ca-certificates curl bash sudo \
         gnupg2 jq unzip xz less procps-ng libatomic tar gzip findutils shadow-utils hostname \
-        python3 python3-pip; \
+        python3 python3-pip \
+        mesa-vulkan-drivers vulkan-loader vulkan-tools; \
       dnf clean all; \
       rm -rf /var/cache/dnf; \
     else \

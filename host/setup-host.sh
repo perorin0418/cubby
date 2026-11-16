@@ -340,27 +340,64 @@ if command -v loginctl >/dev/null 2>&1 && [ -d /run/systemd/system ]    && [ "$(
   warn "linger is off for $(id -un); containers stop when the last SSH session ends"
 fi
 
-# GPU: ctr-connect と同じ指定で GPU 付きのコンテナが起動できるか確かめ、detected.env に書く
-# （CTR_GPU_ARGS を config.env で変えた場合、例えば AMD の --device /dev/kfd --device /dev/dri
-#   では、nvidia-smi の代わりに true で起動だけを確かめる）
-gpu_avail=no gpu_info=
+# GPU: GPU 付きのコンテナが起動できるか確かめ、detected.env に書く。
+#   NVIDIA: ドライバが動いていれば、CDI のデバイス nvidia.com/gpu=all を渡し、nvidia-smi で確かめる
+#   AMD:    amdgpu ドライバの描画ノード（/dev/dri/renderD*）があれば、それと /dev/kfd（ROCm 用）を渡し、
+#           vulkaninfo で GPU が見えるか確かめる（イメージに Mesa の Vulkan ドライバを入れてある）
+#   config.env に CTR_GPU_ARGS を書いた場合は、その引数で起動できるかだけを確かめる
+amd_render_nodes() {
+  for n in /sys/class/drm/renderD*; do
+    [ -e "$n/device/driver" ] || continue
+    [ "$(basename "$(readlink -f "$n/device/driver")")" = amdgpu ] && printf '/dev/dri/%s\n' "$(basename "$n")"
+  done
+  return 0
+}
+gpu_avail=no gpu_info= gpu_vendor= gpu_auto_args=
 if [ "$gpu_mode" != off ]; then
   if [ -n "${CTR_GPU_ARGS:-}" ]; then
-    gargs=$CTR_GPU_ARGS; gtest=true
+    gpu_vendor=custom; gargs=$CTR_GPU_ARGS; gtest=true
+  elif command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi -L >/dev/null 2>&1; then
+    gpu_vendor=nvidia; gargs='--device nvidia.com/gpu=all'; gtest='nvidia-smi -L'
   else
-    gargs='--device nvidia.com/gpu=all'; gtest='nvidia-smi -L'
+    nodes=$(amd_render_nodes)
+    if [ -n "$nodes" ]; then
+      gpu_vendor=amd; gargs=
+      for d in $nodes /dev/kfd; do [ -e "$d" ] && gargs="$gargs --device $d"; done
+      # 誰でも読み書きできる権限でなければ、ホストのユーザーの補助グループ（render・video）をコンテナに引き継ぐ
+      for d in $nodes /dev/kfd; do
+        [ -e "$d" ] || continue
+        case "$(stat -c %A "$d")" in *rw?) ;; *) gargs="$gargs --group-add keep-groups"; break ;; esac
+      done
+      gargs=${gargs# }; gtest='vulkaninfo --summary'
+    fi
   fi
-  if [ -n "${CTR_GPU_ARGS:-}" ] || { command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi -L >/dev/null 2>&1; }; then
+  if [ -n "$gpu_vendor" ]; then
     # shellcheck disable=SC2086
-    if gout=$(podman run --rm --userns=keep-id --user root --passwd=false --security-opt label=disable \
-                --uts=private --network=private $gargs "$IMAGE" $gtest 2>&1 </dev/null); then
+    grc=0
+    gout=$(podman run --rm --userns=keep-id --user root --passwd=false --security-opt label=disable \
+             --uts=private --network=private $gargs "$IMAGE" $gtest 2>&1 </dev/null) || grc=$?
+    case "$gpu_vendor" in
+      nvidia)
+        if [ "$grc" = 0 ]; then
+          n=$(printf '%s\n' "$gout" | grep -c '^GPU [0-9]' || true)
+          [ "$n" -gt 0 ] && gpu_info="NVIDIA $n GPU: $(printf '%s\n' "$gout" | sed -n 's/^GPU 0: \([^(]*\).*/\1/p' | sed 's/ *$//')"
+        fi ;;
+      amd)
+        # vulkaninfo は CPU の llvmpipe も表示するので、それ以外の deviceName を探す
+        gpu_info=$(printf '%s\n' "$gout" | sed -n 's/^[[:space:]]*deviceName[[:space:]]*=[[:space:]]*//p' | grep -v -i llvmpipe | head -n 1)
+        [ -n "$gpu_info" ] || grc=1
+        gpu_auto_args=$gargs ;;
+    esac
+    if [ "$grc" = 0 ]; then
       gpu_avail=yes
-      n=$(printf '%s\n' "$gout" | grep -c '^GPU [0-9]' || true)
-      [ "$n" -gt 0 ] && gpu_info="$n GPU: $(printf '%s\n' "$gout" | sed -n 's/^GPU 0: \([^(]*\).*/\1/p' | sed 's/ *$//')"
-      log "GPU containers available${gpu_info:+ ($gpu_info)}"
+      log "GPU containers available ($gpu_vendor${gpu_info:+: $gpu_info}; podman args: $gargs)"
     else
+      gpu_info=
       printf '%s\n' "$gout" | tail -n 5 >&2
-      warn "the NVIDIA driver works on the host, but a GPU container does not start; GPU containers are disabled"
+      case "$gpu_vendor" in
+        amd) warn "an AMD GPU is present, but a container cannot use it (device permissions? the login user may need the render/video groups); GPU containers are disabled" ;;
+        *)   warn "a $gpu_vendor GPU seems usable on the host, but a GPU container does not start; GPU containers are disabled" ;;
+      esac
     fi
   else
     log "no usable GPU on this host (gpu-* connections are disabled)"
@@ -387,6 +424,8 @@ fi
   echo "# written by setup-host.sh (cubby). Do not edit; override in config.env instead."
   echo "CTR_GPU_AVAILABLE=$gpu_avail"
   echo "CTR_GPU_INFO='$(printf '%s' "$gpu_info" | tr -d "'")'"
+  echo "CTR_GPU_VENDOR='$gpu_vendor'"
+  echo "CTR_GPU_AUTO_ARGS='$gpu_auto_args'"
   echo "CTR_PODMAN_SOCKET='$psock'"
 } > "$CONF_DIR/detected.env"
 

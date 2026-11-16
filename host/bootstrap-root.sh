@@ -9,7 +9,8 @@
 #     - パッケージ: podman, git, flock, ssh-keygen, tar, newuidmap/newgidmap など
 #     - /etc/subuid・/etc/subgid に USER の範囲（65536 個）
 #     - USER の linger（SSH が切れてもコンテナと Claude Code 本体を動かし続ける）
-#     - GPU（--gpu auto のとき。既定）: NVIDIA のドライバが動いていれば、
+#     - GPU（--gpu auto のとき。既定）: AMD の GPU があり、その装置ファイルを USER が使えなければ、
+#       USER を所有グループ（render・video）に加える。NVIDIA のドライバが動いていれば、
 #       NVIDIA Container Toolkit を入れ、CDI の定義（/etc/cdi/nvidia.yaml）を作る。
 #       ドライバの版が変わって CDI の定義が古くなっていれば作り直す。
 #       ドライバ自体は入れない（カーネル・再起動・Secure Boot が絡むため）。
@@ -58,8 +59,31 @@ cdi_fresh() {
   v=$(driver_version)
   [ -z "$v" ] || grep -qF "$v" "$CDI_SPEC"
 }
+# ---- GPU（AMD） ----
+# amdgpu ドライバの描画ノードと /dev/kfd のうち、USER が読み書きできないもの
+amd_blocked_nodes() {
+  [ "$gpu" = auto ] || return 0
+  for n in /sys/class/drm/renderD*; do
+    [ -e "$n/device/driver" ] || continue
+    [ "$(basename "$(readlink -f "$n/device/driver")")" = amdgpu ] || continue
+    for d in "/dev/dri/$(basename "$n")" /dev/kfd; do
+      [ -e "$d" ] || continue
+      if [ "$check" = 1 ]; then
+        [ -r "$d" ] && [ -w "$d" ] && continue
+      elif command -v runuser >/dev/null 2>&1; then
+        runuser -u "$user" -- sh -c "[ -r '$d' ] && [ -w '$d' ]" && continue
+      else
+        su "$user" -s /bin/sh -c "[ -r '$d' ] && [ -w '$d' ]" && continue
+      fi
+      printf '%s
+' "$d"
+    done
+  done | sort -u
+}
+
 # GPU のために root が要る作業: 出力が空なら不要
 gpu_needs() {
+  [ -z "$(amd_blocked_nodes)" ] || printf 'amd-device-groups '
   nvidia_driver_ok || return 0
   command -v nvidia-ctk >/dev/null 2>&1 || { printf 'nvidia-container-toolkit '; }
   cdi_fresh || printf 'cdi-spec '
@@ -189,6 +213,15 @@ if linger_needed; then
   loginctl enable-linger "$user"
   log "enabled linger for $user"
 fi
+
+# GPU（AMD）: 描画ノード・/dev/kfd を USER が使えなければ、その所有グループ（render・video）に USER を加える
+for d in $(amd_blocked_nodes); do
+  g=$(stat -c %G "$d")
+  if [ -n "$g" ] && [ "$g" != root ] && ! id -nG "$user" | tr ' ' '
+' | grep -qx "$g"; then
+    usermod -aG "$g" "$user" && log "added $user to group $g (for $d; takes effect on the next login)"
+  fi
+done
 
 # GPU（NVIDIA）
 if nvidia_driver_ok; then
