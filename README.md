@@ -75,6 +75,7 @@ tests/smoke.sh          CLI で確かめられる受け入れテスト（手元�
 | パッケージ | podman, git, flock, ssh-keygen, tar, newuidmap/newgidmap ほか（apt / dnf / yum / zypper / pacman / apk に対応） |
 | rootless の設定 | `/etc/subuid`・`/etc/subgid` の範囲、newuidmap/newgidmap の権限、linger |
 | GPU（NVIDIA） | ドライバが動いていれば、NVIDIA Container Toolkit と CDI の定義（「GPU を使う」を参照） |
+| GPU（AMD） | GPU の装置ファイル（`/dev/dri/renderD*`・`/dev/kfd`）をログインユーザーが使えなければ、所有グループ（render・video）に加える |
 | cubby 本体 | 設定、コンテナ用のホスト鍵、公開鍵の登録、スクリプト、コンテナイメージ |
 
 root が要る作業は、残っているときだけ sudo で行います（2 回目以降は通常 sudo を使いません）。sudo にパスワードが要る場合は、先に入力したログインのパスワードをまず試し、違えば手元の端末で尋ねます。既存のディレクトリの所有者や中身、既存の設定値は変えません。
@@ -229,7 +230,8 @@ sudo apt-get update && sudo apt-get install -y jq
 | `gpu-<作業名>.<ホストID>` | ホストの全 GPU が見える | GPU が使えるホスト（`cubby hosts` で `gpu=yes`） |
 
 ```sh
-ssh gpu-train.lab1 nvidia-smi -L   # → GPU 0: NVIDIA ...
+ssh gpu-train.lab1 nvidia-smi -L          # NVIDIA → GPU 0: NVIDIA ...
+ssh gpu-llm.lab2 vulkaninfo --summary      # AMD → deviceName = AMD Radeon 8060S Graphics (RADV STRIX_HALO)
 sh client/cubby hosts
 # lab1   ssh-host=lab1   gpu=yes   connect as ctr-<name>.lab1, gpu-<name>.lab1
 # lab2   ssh-host=lab2   gpu=no    connect as ctr-<name>.lab2
@@ -237,6 +239,10 @@ sh client/cubby hosts
 
 - `ctr-x` と `gpu-x` は別のコンテナ・別のホームです（GPU の有無はコンテナを作るときに決まるため）。
 - GPU が使えないホストに `gpu-` でつなぐと、何も作らずに接続を断ります（`ctr-` でつなぐよう案内します）。
+
+NVIDIA と AMD の GPU に対応しています。どちらかを自動で判定します（両方あるホストでは NVIDIA を使います）。
+
+### NVIDIA
 
 **ホストの準備（自動）**: `cubby add-host` は、ホストで **NVIDIA のドライバが動いていれば**（`nvidia-smi` が通れば）、次を自動で行います。
 1. NVIDIA の公式リポジトリを追加し、NVIDIA Container Toolkit を入れる（apt / dnf / yum / zypper / pacman）
@@ -247,7 +253,20 @@ sh client/cubby hosts
 - ドライバを更新すると CDI の定義が古くなります。`cubby update <id>` を実行すると作り直します（版の食い違いを検出します）。
 - GPU の準備をしたくないホストでは `--no-gpu` を付けます。
 - コンテナにはホストのドライバのライブラリと `nvidia-smi` が入ります。CUDA Toolkit は入れていないので、PyTorch など CUDA を同梱するパッケージを使うか、コンテナ内で入れてください。
-- **AMD の GPU** は自動では準備しません。ホストの `~/.config/cubby/config.env` に `CTR_GPU_ARGS="--device /dev/kfd --device /dev/dri --group-add keep-groups"` のように書いて `cubby update <id>` を実行すると、その指定で起動できるかを確かめ、`gpu-` の接続で使えるようになります。
+
+### AMD（Radeon・Ryzen AI Max などの内蔵 GPU も）
+
+**ホストの準備（自動）**: `cubby add-host` / `cubby update` は、ホストに **amdgpu ドライバの GPU があれば**（`/dev/dri/renderD*`）、次を自動で行います。
+
+1. GPU の装置ファイル（`/dev/dri/renderD*` と ROCm 用の `/dev/kfd`）をログインユーザーが使えなければ、その所有グループ（render・video）にユーザーを加える（sudo）
+2. `gpu-` のコンテナにその装置ファイルを渡す（`--device /dev/dri/renderD128 --device /dev/kfd`。装置ファイルが誰でも使える権限でなければ `--group-add keep-groups` も付ける）
+3. 実際に GPU 付きのコンテナで `vulkaninfo` が GPU を表示するか確かめ、結果を `detected.env` と `cubby hosts` に反映する
+
+- AMD のドライバ（amdgpu）は Linux のカーネルに入っているので、ドライバの導入は要りません。
+- コンテナには **Vulkan（Mesa の RADV）** が入っています。LLM なら llama.cpp の Vulkan 版（`-DGGML_VULKAN=ON` でビルド）などで GPU を使えます。ビルドには `glslc` と Vulkan の開発用パッケージ（Fedora なら `sudo dnf install glslc vulkan-loader-devel vulkan-headers`）が要ります。
+- **ROCm は入れていません**（数 GB あり、対応する GPU・版の組み合わせが限られるため）。ROCm を使うなら、コンテナの中から ROCm のイメージを `docker run --device /dev/kfd --device /dev/dri ...` で起動します。
+- 統合メモリの PC（Ryzen AI Max+ 395 など）では、GPU が使えるメモリの上限はホストのカーネルの設定（GTT の大きさ）で決まります。大きなモデルを GPU に載せきれないときは、ホストのカーネルのパラメーターを見直してください（cubby は変更しません）。
+- 判定を上書きしたいときは、ホストの `~/.config/cubby/config.env` に `CTR_GPU_ARGS="..."` を書いて `cubby update <id>` を実行します（その指定で起動できるかだけを確かめます）。
 
 ## 自動更新（リポジトリに push すると各ホストに反映）
 
@@ -370,7 +389,7 @@ macOS・Linux・Git Bash は `sh client/cubby ...`、Windows の PowerShell は 
 | `--key FILE` | `~/.ssh/id_ed25519.pub` → `id_ecdsa.pub` → `id_rsa.pub` → ssh-agent の鍵 → どれもなければ `~/.ssh/id_ed25519` を作る | コンテナ（とホスト）に登録する公開鍵 |
 | `--mount SPEC` | なし | そのホストの全コンテナに毎回マウントするディレクトリを足す。複数指定可。`SPEC` は `ホストのパス[:コンテナ内のパス][:ro\|rw]`（省略時は同じパス・`rw`） |
 | `--unmount PATH` | なし | そのホストのパスのマウントをやめる。複数指定可 |
-| `--no-gpu` | GPU を自動判定 | GPU の準備（NVIDIA Container Toolkit の導入・CDI の定義の作成）をしない |
+| `--no-gpu` | GPU を自動判定 | GPU の準備（NVIDIA Container Toolkit の導入・CDI の定義の作成、AMD の装置ファイルのグループの設定）と判定をしない |
 | `--rebuild` | 必要なときだけ | コンテナイメージを作り直す（イメージの版が古いときは指定しなくても作り直す） |
 | `--replace-hostkey` | なし | コンテナのホスト鍵が known_hosts の記録と違っても置き換える（ホスト側で鍵を作り直したとき） |
 | `--no-auto-update` | 自動更新あり | 自動更新（ホストが cubby のリポジトリを定期的に取得して反映する）を止める |
@@ -438,7 +457,7 @@ sh tests/smoke.sh <id> [--cleanup]
 |---|---|---|
 | `CTR_HOST_ID` | `add-host` の ID | このホストの ID。接続名のホスト ID と一致しない接続は断る |
 | `CTR_IMAGE` | `localhost/ctr-dev:latest` | コンテナイメージ |
-| `CTR_GPU_ARGS` | `--device nvidia.com/gpu=all` | `gpu-` のコンテナに付ける podman の引数（例 AMD は `--device /dev/kfd --device /dev/dri --group-add keep-groups`） |
+| `CTR_GPU_ARGS` | 自動判定（NVIDIA は `--device nvidia.com/gpu=all`、AMD は `--device /dev/dri/renderD* --device /dev/kfd`） | `gpu-` のコンテナに付ける podman の引数を上書きする |
 | `CTR_SUDO` | `yes` | `no` にするとコンテナ内の sudo を許可しない |
 | `CTR_AUTO_RECREATE` | `yes` | `no` にすると、古くなったコンテナを接続時に自動で作り直さない（`ctr-recreate` で手動） |
 | `CTR_BASE_IMAGE` | ホストの OS に合わせて選ぶ | コンテナのベースイメージを固定する（例 `docker.io/library/debian:12-slim`） |
@@ -479,7 +498,8 @@ sh tests/smoke.sh <id> [--cleanup]
 | `key authentication still fails` | ホストの `~`・`~/.ssh` の権限（グループや他人が書けると sshd が鍵を無視する）。鍵にパスフレーズがあるなら ssh-agent に登録されているか |
 | `accepts only public keys` | ホストがパスワード認証を許可していない。最初の鍵の登録だけ別の手段で行う |
 | `--repo ... was removed` | リポジトリの管理はなくなった。コンテナ内で clone する |
-| `this host has no usable GPU` | `cubby hosts` の `gpu=`。ホストで `nvidia-smi` が通るか（ドライバ）。通るなら `cubby update <id>` |
+| `this host has no usable GPU` | `cubby hosts` の `gpu=`。NVIDIA ならホストで `nvidia-smi` が通るか（ドライバ）。AMD なら `/dev/dri/renderD*` があるか。直したら `cubby update <id>` |
+| `an AMD GPU is present, but a container cannot use it` | ログインユーザーが render・video グループに入っているか（`id`）。`cubby update <id>` が加えた直後は、ホストに一度ログインし直してから再実行 |
 | `gpu=no` なのに GPU がある | ドライバの更新後なら `cubby update <id>` で CDI の定義を作り直す。`update` の出力の `WARNING`（toolkit の導入や `nvidia-ctk cdi generate` の失敗） |
 | コンテナにマウントが見えない | `ctr-list` の extra mounts（ホストにないパスは飛ばされる）。設定を変えた後なら `ctr-recreate <名前>` |
 | `auto-update: ... -> fetch-failed` / `clone-failed` | ホストからリポジトリに届くか（ネットワーク）。非公開リポジトリならデプロイキーが GitHub に登録されているか。ホストで `ctr-sync` を実行するとエラーが見える |
@@ -526,7 +546,7 @@ sh tests/smoke.sh <id> [--cleanup]
 | — | linger を有効化する | rootless では、無効だとログアウト時にコンテナが止まるため |
 | ホストの事前準備（docker・git の導入、ディレクトリ作成）は手作業 | `cubby add-host` が必要なときだけ sudo で自動実行（`host/bootstrap-root.sh`） | 利用者の要望 |
 | ホストへのログインは鍵認証が前提 | パスワード認証のホストでも、`add-host` が初回に公開鍵を登録する | 利用者の要望 |
-| GPU の扱いなし | 接続名 `gpu-<作業名>` で GPU 付きコンテナ（CDI `nvidia.com/gpu=all`）。NVIDIA Container Toolkit と CDI の定義を自動で準備し、使えるホストかを自動判定 | 利用者の要望 |
+| GPU の扱いなし | 接続名 `gpu-<作業名>` で GPU 付きコンテナ。NVIDIA（CDI `nvidia.com/gpu=all`。Toolkit と CDI の定義を自動で準備）と AMD（`/dev/dri`・`/dev/kfd` を渡す。イメージに Vulkan）を自動判定 | 利用者の要望 |
 | マウントは repo の `.git`・worktree・ホーム・鍵のみ | ホストごとの `~/.config/cubby/mounts` で任意のディレクトリを全コンテナにマウント。`cubby add-host --mount/--unmount`、反映は `ctr-recreate` | 利用者の要望 |
 | — | `~/.ssh/config` の書き換えを mkdir のロックで排他し、別のファイルに書いてから置き換える | 複数の `add-host` を同時に動かすと、互いのブロックを上書きしたり、書き換え中のファイルを ssh が読んで失敗したりしたため（検証で判明） |
 | コンテナ内に `dev` ユーザーを作り（UID/GID をホストに合わせてイメージをビルド）、`dev` でログイン | ユーザーは作らない。起動時にホストのログインユーザー（同じ名前・UID・GID・ホームのパス）をコンテナの `/etc/passwd` に登録し、その名前でログインする。イメージはホストに依存しない（版のラベルで古いイメージを自動で作り直す） | 権限の食い違いを避けるため（利用者の要望） |

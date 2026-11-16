@@ -260,7 +260,7 @@ if [ "$gavail" = yes ]; then
   else
     gvendor=$(remote 'sed -n "s/^CTR_GPU_VENDOR=//p" "${XDG_CONFIG_HOME:-$HOME/.config}/cubby/detected.env"' | tr -d "\r'")
     case "$gvendor" in
-      amd) gcmd="vulkaninfo --summary 2>/dev/null | sed -n 's/^ *deviceName *= *//p' | grep -vi llvmpipe | head -n 1" ;;
+      amd) gcmd="vulkaninfo --summary 2>/dev/null | sed -n 's/^[[:space:]]*deviceName[[:space:]]*=[[:space:]]*//p' | grep -vi llvmpipe | head -n 1" ;;
       *)   gcmd="nvidia-smi -L | grep -m1 '^GPU 0'" ;;
     esac
     out=$(rssh -o BatchMode=yes "$GNAME.$ID" "hostname; $gcmd" </dev/null 2>/dev/null | tr -d '\r')

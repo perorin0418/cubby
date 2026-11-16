@@ -14,7 +14,7 @@
 #                           設定を使うときに指定する（既定は <id>）
 #       --key FILE          コンテナに登録する公開鍵（既定: ~/.ssh/id_ed25519.pub など）
 #       --rebuild           コンテナイメージを作り直す
-#       --no-gpu            GPU の準備（NVIDIA Container Toolkit の導入など）をしない
+#       --no-gpu            GPU の準備と判定（NVIDIA Container Toolkit の導入、AMD の装置ファイルの権限など）をしない
 #       --mount SPEC        ホストの全コンテナに毎回マウントするディレクトリを足す（複数可）
 #                           SPEC は ホストのパス[:コンテナ内のパス][:ro|rw]（省略時は同じパス・rw）
 #                           例 --mount /data/datasets:/datasets:ro --mount /scratch

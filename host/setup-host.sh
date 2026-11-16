@@ -372,8 +372,8 @@ if [ "$gpu_mode" != off ]; then
     fi
   fi
   if [ -n "$gpu_vendor" ]; then
-    # shellcheck disable=SC2086
     grc=0
+    # shellcheck disable=SC2086
     gout=$(podman run --rm --userns=keep-id --user root --passwd=false --security-opt label=disable \
              --uts=private --network=private $gargs "$IMAGE" $gtest 2>&1 </dev/null) || grc=$?
     case "$gpu_vendor" in
